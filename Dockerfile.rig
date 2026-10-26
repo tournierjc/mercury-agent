@@ -1,0 +1,30 @@
+# Mercury from source — test rig for the work merged upstream (#225 attachments, #226 avatars).
+# Not a release image: no dashboard UI build (ui/dist), API + runtime only.
+FROM node:22-bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Europe/Paris \
+    MERCURY_NO_UPDATE_CHECK=1 \
+    NODE_ENV=production \
+    HOME=/home/node
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates git curl jq ripgrep procps less tini tzdata \
+      python3 make g++ \
+ && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY package.json package-lock.json ./
+# --include=dev: NODE_ENV=production above makes npm skip tsup and vitest otherwise.
+RUN npm ci --include=dev --no-audit --no-fund
+COPY . .
+# tsup only: npm run build also runs scripts/post-build.cjs, which builds the
+# React dashboard (needs ui/node_modules). This rig serves the API, not the UI.
+RUN npx tsup && ls -la dist/ | head -5
+
+RUN mkdir -p /work && chown -R node:node /src /work
+USER node
+WORKDIR /work
+CMD ["tini", "--", "node", "/src/dist/index.js", "start", "--daemon"]

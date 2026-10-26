@@ -1,8 +1,8 @@
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CodeBlock } from "./CodeBlock";
-import { OpenUiBlock } from "./OpenUiBlock";
-import { OPENUI_FENCE } from "@/lib/openui";
+import { PluginRendererFrame } from "./PluginRendererFrame";
+import { useRenderer } from "@/lib/renderers";
 import { cn } from "@/lib/utils";
 
 interface MarkdownRendererProps {
@@ -10,20 +10,29 @@ interface MarkdownRendererProps {
   className?: string;
 }
 
+/**
+ * A fenced block, drawn by whoever claims its language.
+ *
+ * The dashboard knows nothing about the languages: a plugin declares one
+ * (`contributes.renderers`), Mercury serves its HTML behind a locked-down CSP, and it
+ * runs sandboxed. With no plugin installed — or while the listing loads, or if the
+ * renderer reports a failure — this is exactly the code block it always was.
+ */
+function FencedBlock({ code, language }: { code: string; language: string }) {
+  const { renderer, loading } = useRenderer(language);
+  if (loading || !renderer) return <CodeBlock code={code} language={language} />;
+  return <PluginRendererFrame renderer={renderer} text={code} complete />;
+}
+
 const components: Components = {
   code({ className, children, ...props }) {
     const match = /language-(\w+)/.exec(className || "");
     const codeString = String(children).replace(/\n$/, "");
 
-    // The openui contract: a spec is drawn as components, or shown as code with the
-    // reason it was refused. Everything else stays a code block.
-    if (match && match[1] === OPENUI_FENCE) {
-      return <OpenUiBlock spec={codeString} />;
-    }
-
-    // Fenced code blocks get rendered by CodeBlock
+    // Fenced blocks go through the renderer registry: a plugin may claim a language and
+    // ship an HTML renderer for it, everything else keeps the code block.
     if (match) {
-      return <CodeBlock code={codeString} language={match[1]} />;
+      return <FencedBlock code={codeString} language={match[1]} />;
     }
 
     // Inline code
