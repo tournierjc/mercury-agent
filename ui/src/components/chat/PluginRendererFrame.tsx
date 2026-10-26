@@ -132,7 +132,8 @@ export function PluginRendererFrame({ renderer, text, complete }: PluginRenderer
         src={renderer.url}
         sandbox="allow-scripts"
         referrerPolicy="no-referrer"
-        loading="lazy"
+        // No `loading="lazy"`: a frame that loads while scrolled out of view inside the
+        // message list can be left unpainted by the compositor. The frame is a few KB.
         // `onLoad` fires after the frame's script has run, so the render cannot be lost to a
         // `ready` posted before this window had a listener (a reloaded page hits that race).
         onLoad={sendRender}
