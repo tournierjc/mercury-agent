@@ -133,6 +133,9 @@ export function PluginRendererFrame({ renderer, text, complete }: PluginRenderer
         sandbox="allow-scripts"
         referrerPolicy="no-referrer"
         loading="lazy"
+        // `onLoad` fires after the frame's script has run, so the render cannot be lost to a
+        // `ready` posted before this window had a listener (a reloaded page hits that race).
+        onLoad={sendRender}
         className="rounded-lg border border-border bg-transparent"
         style={{
           display: "block",
