@@ -115,7 +115,8 @@ function fileFingerprint(attachment: ChannelAttachment): string {
     return attachment.path;
   }
 }
-
+ * ("what is this?") with two different photos must not collapse into one.
+ */
 export function idempotencyKeyFor(
   botId: string,
   trigger: BotTrigger,
@@ -124,6 +125,7 @@ export function idempotencyKeyFor(
   attachments?: ChannelAttachment[],
 ): string {
   const files = (attachments ?? []).map(fileFingerprint).join(',');
+  const files = (attachments ?? []).map(a => a.path).join(',');
   return createHash('sha256').update(`${botId}|${trigger}|${prompt}|${fromBot ?? ''}|${files}`).digest('hex').slice(0, 16);
 }
 

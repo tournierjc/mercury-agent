@@ -7,7 +7,7 @@ import type { CapabilityRegistry } from '../capabilities/registry.js';
 import type { UserMemoryStore } from '../memory/user-memory.js';
 import type { TokenBudget } from '../utils/tokens.js';
 import type { BaseProvider } from '../providers/base.js';
-import { withAttachments } from '../core/attachments.js';
+
 import { classifyStreamCompletion } from '../core/stream-completion.js';
 import { stepsExhaustedPrompt } from '../core/completion-verdict.js';
 import { isFailedToolResult } from '../core/execute-guard.js';
@@ -15,7 +15,7 @@ import { MAX_AUTOMATIC_CONTINUATIONS } from '../core/execution-limits.js';
 import { formatToolStep } from '../utils/tool-label.js';
 import { logger } from '../utils/logger.js';
 import type { BotManifest, BotTrigger } from './types.js';
-import type { ChannelAttachment } from '../types/channel.js';
+
 
 /** Mailbox messages injected mid-turn (bot-to-bot or queued user input). */
 export interface BotTurnMail {
@@ -252,6 +252,7 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
       metadata: { attachments: files },
     } as never;
     const withFiles = withAttachments(messages, turnMessage, provider.name, provider.getModel(), provider.seesImages);
+    const withFiles = withAttachments(messages, turnMessage, provider.name, provider.getModel());
     messages.splice(0, messages.length, ...withFiles);
   }
 

@@ -352,19 +352,19 @@ describe('web bots API — avatars', () => {
 describe('web bots API — files on a bot message', () => {
   const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
   let savedHome: string | undefined;
-
   beforeEach(() => {
     // Uploads land in `<mercury home>/uploads`: keep them in this test's folder, never the real home.
     savedHome = process.env.MERCURY_HOME;
     process.env.MERCURY_HOME = root;
     store.create({ id: 'painter', name: 'Painter' });
   });
-
   afterEach(() => {
     if (savedHome === undefined) delete process.env.MERCURY_HOME;
     else process.env.MERCURY_HOME = savedHome;
   });
-
+  beforeEach(() => {
+    store.create({ id: 'painter', name: 'Painter' });
+  });
   const send = (body: unknown) =>
     app.request('/api/bots/painter/message', {
       method: 'POST',
@@ -387,13 +387,11 @@ describe('web bots API — files on a bot message', () => {
     // The first copy belongs to the queued job; the retry's copy has no job to read it.
     vi.spyOn(manager, 'enqueue').mockReturnValue({ jobId: 'queued', accepted: true, duplicated: true });
     const res = await send({ message: 'what is this?', attachments: [{ name: 'dot.png', data: PNG.toString('base64') }] });
-
     expect(res.status).toBe(202);
     await expect(jreq(res)).resolves.toMatchObject({ accepted: true, jobId: 'queued' });
     const stored = readdirSync(join(root, 'uploads'), { recursive: true, withFileTypes: true }).filter(e => e.isFile());
     expect(stored).toHaveLength(0);
   });
-
   it('still takes a plain message with no files', async () => {
     const res = await send({ message: 'check the logs' });
     expect(res.status).toBe(202);

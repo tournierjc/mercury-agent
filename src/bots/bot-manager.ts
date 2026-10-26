@@ -23,7 +23,6 @@ import { createFleetDelegateTool, createFleetTasksTool, createFleetPipelineTool 
 import { createBotStateTool } from './tools/bot-state.js';
 import { extractBotMemories } from './memory-extract.js';
 import { runBotDoctor, type DoctorReport } from './doctor.js';
-import type { ChannelAttachment } from '../types/channel.js';
 import { createBotDeliverTool } from './tools/bot-deliver.js';
 import { createBotScheduleTool, type BotScheduler } from './tools/bot-schedule.js';
 import { createFleetStatusTool } from './tools/fleet-status.js';
@@ -61,12 +60,7 @@ export interface BotJob {
   attachments?: ChannelAttachment[];
   /** 'chat' answers the owner in the app; 'work' (default) delivers. */
   mode?: 'work' | 'chat';
-  /**
-   * Photos and PDFs for this turn, already stored on disk (`web/api/uploads.ts`).
-   * In-memory only: a job that survives a restart loses its files rather than pointing at paths
-   * that may be gone — the durable record has no column for them, and a stale path is worse than
-   * a missing one.
-   */
+  /** Photos/PDFs to hand the turn; `web/api/uploads.ts` already wrote them to disk. */
   attachments?: ChannelAttachment[];
   createdAt: number;
   attempts: number;
@@ -457,6 +451,7 @@ export class BotManager {
       source: job.source,
       attachments: job.attachments,
       mode: job.mode,
+      attachments: job.attachments,
       attempts: job.attempts ?? 0,
       createdAt: Date.now(),
       idempotencyKey: idempotencyKeyFor(botId, job.trigger, job.prompt, job.fromBot, job.attachments),
