@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { basename, extname, isAbsolute, relative, resolve, join } from 'node:path';
 import { writeFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, rmSync } from 'node:fs';
 import type { Tool } from 'ai';
+import type { ChannelAttachment } from '../types/channel.js';
 import type { MercuryConfig } from '../utils/config.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import type { TokenBudget } from '../utils/tokens.js';
@@ -22,7 +23,6 @@ import { createFleetDelegateTool, createFleetTasksTool, createFleetPipelineTool 
 import { createBotStateTool } from './tools/bot-state.js';
 import { extractBotMemories } from './memory-extract.js';
 import { runBotDoctor, type DoctorReport } from './doctor.js';
-import type { ChannelAttachment } from '../types/channel.js';
 import { createBotDeliverTool } from './tools/bot-deliver.js';
 import { createBotScheduleTool, type BotScheduler } from './tools/bot-schedule.js';
 import { createFleetStatusTool } from './tools/fleet-status.js';
@@ -58,12 +58,7 @@ export interface BotJob {
   source?: { channelType: string; channelId: string };
   /** 'chat' answers the owner in the app; 'work' (default) delivers. */
   mode?: 'work' | 'chat';
-  /**
-   * Photos and PDFs for this turn, already stored on disk (`web/api/uploads.ts`).
-   * In-memory only: a job that survives a restart loses its files rather than pointing at paths
-   * that may be gone — the durable record has no column for them, and a stale path is worse than
-   * a missing one.
-   */
+  /** Photos/PDFs to hand the turn; `web/api/uploads.ts` already wrote them to disk. */
   attachments?: ChannelAttachment[];
   createdAt: number;
   attempts: number;
@@ -452,9 +447,10 @@ export class BotManager {
       fromBot: job.fromBot,
       source: job.source,
       mode: job.mode,
+      attachments: job.attachments,
       attempts: job.attempts ?? 0,
       createdAt: Date.now(),
-      idempotencyKey: idempotencyKeyFor(botId, job.trigger, job.prompt, job.fromBot),
+      idempotencyKey: idempotencyKeyFor(botId, job.trigger, job.prompt, job.fromBot, job.attachments),
     });
     if (durable.duplicated) {
       return { jobId: durable.job.id, accepted: true };
