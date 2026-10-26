@@ -1,6 +1,8 @@
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CodeBlock } from "./CodeBlock";
+import { OpenUiBlock } from "./OpenUiBlock";
+import { OPENUI_FENCE } from "@/lib/openui";
 import { cn } from "@/lib/utils";
 
 interface MarkdownRendererProps {
@@ -12,6 +14,12 @@ const components: Components = {
   code({ className, children, ...props }) {
     const match = /language-(\w+)/.exec(className || "");
     const codeString = String(children).replace(/\n$/, "");
+
+    // The openui contract: a spec is drawn as components, or shown as code with the
+    // reason it was refused. Everything else stays a code block.
+    if (match && match[1] === OPENUI_FENCE) {
+      return <OpenUiBlock spec={codeString} />;
+    }
 
     // Fenced code blocks get rendered by CodeBlock
     if (match) {
