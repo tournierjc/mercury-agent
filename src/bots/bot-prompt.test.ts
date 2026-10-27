@@ -49,6 +49,11 @@ describe('bot system prompt', () => {
     expect(prompt).not.toContain('Work, don\'t narrate');
   });
 
+  it('a chat turn answers in the conversation instead of delivering files', () => {
+    const prompt = buildBotSystemPrompt(input({ mode: 'chat' }));
+    expect(prompt).toContain('Do not deliver a file unless the owner explicitly asks');
+  });
+
   it('a chat turn still carries the persona and the sandbox', () => {
     const prompt = buildBotSystemPrompt(input({ mode: 'chat' }));
     expect(prompt).toContain('Atelier');
