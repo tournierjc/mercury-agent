@@ -52,6 +52,8 @@ export interface BotJob {
   source?: { channelType: string; channelId: string };
   /** Photos/PDFs to hand the turn; `web/api/uploads.ts` already wrote them to disk. */
   attachments?: ChannelAttachment[];
+  /** 'chat' answers the owner in the app; 'work' (default) delivers. */
+  mode?: 'work' | 'chat';
   createdAt: number;
   attempts: number;
   /** Scheduler task id for cron runs (routine gating + no-outcome streaks). */
@@ -396,7 +398,7 @@ export class BotManager {
     return this.journalFor(botId);
   }
 
-  enqueue(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; attachments?: ChannelAttachment[] }): { jobId: string; accepted: boolean; reasonCode?: string; duplicated?: boolean } {
+  enqueue(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; attachments?: ChannelAttachment[]; mode?: 'work' | 'chat' }): { jobId: string; accepted: boolean; reasonCode?: string; duplicated?: boolean } {
     const manifest = this.store.get(botId);
     if (!manifest) return { jobId: '', accepted: false, reasonCode: 'target_unknown' };
     if (!manifest.enabled || this.disabled.has(botId)) return { jobId: '', accepted: false, reasonCode: 'target_disabled' };
@@ -439,6 +441,7 @@ export class BotManager {
       fromBot: job.fromBot,
       source: job.source,
       attachments: job.attachments,
+      mode: job.mode,
       attempts: job.attempts ?? 0,
       createdAt: Date.now(),
       idempotencyKey: idempotencyKeyFor(botId, job.trigger, job.prompt, job.fromBot, job.attachments),
@@ -447,7 +450,10 @@ export class BotManager {
       return { jobId: durable.job.id, accepted: true, duplicated: true };
     }
     const id = durable.job.id;
-    queue.push({ id, botId, trigger: job.trigger, prompt: job.prompt, fromBot: job.fromBot, source: job.source, createdAt: durable.job.createdAt, attempts: durable.job.attempts, routineId: job.routineId });
+    // `mode` travels with the in-memory job too: the durable record and the queue are two
+    // copies of the same job, and a field forgotten in one of them silently turns a chat turn
+    // back into a work turn (which is how a teammate answered "Nothing to do" to a question).
+    queue.push({ id, botId, trigger: job.trigger, prompt: job.prompt, fromBot: job.fromBot, source: job.source, mode: job.mode, createdAt: durable.job.createdAt, attempts: durable.job.attempts, routineId: job.routineId });
     this.pump(botId);
     return { jobId: id, accepted: true };
   }
@@ -1119,6 +1125,7 @@ export class BotManager {
       input: {
         manifest,
         trigger: job.trigger,
+        mode: job.mode,
         prompt: job.prompt,
         attachments: job.attachments,
         persona: this.store.readPersona(botId),
@@ -1126,7 +1133,11 @@ export class BotManager {
         pollMail: () => this.drainMailbox(botId),
         sandbox: { workspace: this.store.sandboxDir(botId), shared: this.store.sharedSandboxDir() },
         deliverablesDir: this.store.deliverablesDir(botId),
-        expects: this.expectationFor(manifest, job),
+        // A chat turn expects a reply, not a deliverable: with the 'work' contract the
+        // outcome gate would nudge it to "deliver something" and, producing nothing, it
+        // answers "Nothing to do" — the right behaviour for a task, the wrong one for a
+        // question.
+        expects: job.mode === 'chat' ? 'message' : this.expectationFor(manifest, job),
         recentRuns: this.recentRunsDigest(botId),
         stateNote: this.store.readState(botId),
         skillsPrompt,

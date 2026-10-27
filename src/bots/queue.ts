@@ -20,6 +20,12 @@ export interface DurableBotJob {
    */
   attachments?: ChannelAttachment[];
   source?: { channelType: string; channelId: string };
+  /**
+   * 'work' (default) is a delivery run judged by what it changed. 'chat' is the owner
+   * talking to the bot in the app: the answer itself is the point, so the turn must reply
+   * instead of reporting "Nothing to do".
+   */
+  mode?: 'work' | 'chat';
   state: 'pending' | 'claimed' | 'dead';
   attempts: number;
   createdAt: number;

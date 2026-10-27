@@ -80,6 +80,14 @@ export const DEFAULT_TURN_LIMITS: BotTurnLimits = {
 export interface BotTurnInput {
   manifest: BotManifest;
   trigger: BotTrigger;
+  /**
+   * 'work' (default): a delivery run, judged by what it changed — the rules below forbid
+   * narrating and tell the bot to answer "Nothing to do" when nothing needed doing.
+   * 'chat': the owner is talking to the bot in the app. The answer is the deliverable, so
+   * those rules would make it reply "Nothing to do" to a question — the one thing a
+   * conversation cannot do.
+   */
+  mode?: 'work' | 'chat';
   /** Durable job id — correlates activity events with the run. */
   jobId?: string;
   prompt: string;
@@ -803,7 +811,7 @@ export function wrapBotTools(
 
 // ---- system prompt --------------------------------------------------------
 
-function buildBotSystemPrompt(input: BotTurnInput): string {
+export function buildBotSystemPrompt(input: BotTurnInput): string {
   const { manifest } = input;
   let prompt = `You are "${manifest.name}", a Mercury bot (id: ${manifest.id}).\n`;
   if (manifest.description) {
@@ -826,11 +834,22 @@ function buildBotSystemPrompt(input: BotTurnInput): string {
     }
   }
 
-  prompt += `\n\nOperating rules:
+  if (input.mode === 'chat') {
+    // The owner is talking to this bot in the app. Answer like a person, not like a worker
+    // filing a report: the text IS the reply, and a question has an answer even when no
+    // tool is needed.
+    prompt += `\n\nConversation rules:
+- You are talking with your owner, in the Mercury app, in a conversation they read. Your final text IS your reply: write it to be read, and stop.
+- Answer what was asked. Never reply "Nothing to do" and never write a report about the run — no "the user asked X, so I did Y", just the answer.
+- Use your tools when they help (a file to write, a command to check), but a question that needs no tool still deserves a real answer.
+- Be concise and concrete; say plainly when something is outside your specialty.`;
+  } else {
+    prompt += `\n\nOperating rules:
 - You run unattended: NEVER ask the user questions or wait for confirmation. If a required input is missing, state the assumption you are proceeding with.
 - Actions you lack permission for are denied automatically (fail-closed). Do not attempt workarounds; report what you could not do.
 - Stay in your specialty; say so plainly when a request falls outside it.
 - Work, don't narrate: a run is judged by what it delivered or changed, not by what it wrote about itself. Do not write records, receipts, logs or status files about your own runs — Mercury keeps the journal. If there is nothing to do, say "Nothing to do:" and the reason, and stop.`;
+  }
 
   // Sandbox: the bot's always-granted work areas (rw+x, no permission ask).
   prompt += `\n\nSandbox (always granted — read, write, execute; no permission needed):

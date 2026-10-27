@@ -251,6 +251,25 @@ app.patch('/api/bots/:id', async (c: any) => {
 });
 
 // Message a bot (durable enqueue; returns the job id immediately)
+/**
+ * A message in the owner's conversation with a bot.
+ *
+ * Same queue and the same activity stream as `message`, but the turn runs in chat mode: the
+ * bot answers the question instead of filing a work report (which, for a question that needs
+ * no tool, would be "Nothing to do").
+ */
+app.post('/api/bots/:id/chat', async (c: any) => {
+  if (!botManager) return c.json({ error: 'Bots not available' }, 400);
+  const id = c.req.param('id');
+  const body = await c.req.json().catch(() => null) as { message?: string; from?: string } | null;
+  if (!body?.message) return c.json({ error: 'message is required' }, 400);
+  const result = botManager.enqueue(id, { trigger: 'api', prompt: body.message, fromBot: body.from, mode: 'chat' });
+  if (!result.accepted) {
+    return c.json({ accepted: false, reasonCode: result.reasonCode }, 409);
+  }
+  return c.json({ accepted: true, jobId: result.jobId, status: 'accepted' }, 202);
+});
+
 app.post('/api/bots/:id/message', async (c: any) => {
   if (!botManager) return c.json({ error: 'Bots not available' }, 400);
   const id = c.req.param('id');
