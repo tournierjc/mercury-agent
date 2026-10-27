@@ -40,6 +40,12 @@ import type {
   BotTrigger,
 } from './types.js';
 
+/**
+ * How much of a turn's answer the journal keeps. Enough for a full chat answer (the transcript
+ * has the rest); the file is JSONL per bot, so this bounds growth without truncating replies.
+ */
+const JOURNAL_SUMMARY_MAX = 8000;
+
 export interface BotJob {
   id: string;
   botId: string;
@@ -847,7 +853,10 @@ export class BotManager {
         durationMs: Date.now() - job.createdAt,
         tokensIn: output.tokensIn,
         tokensOut: output.tokensOut,
-        summary: output.output.slice(0, 300),
+        // The whole answer, not a teaser: a client that cannot fetch the transcript (a race at
+        // turn end, an offline phone) must still show what the bot said. 300 characters cut
+        // answers mid-sentence and made a delivered answer look like it had vanished.
+        summary: output.output.slice(0, JOURNAL_SUMMARY_MAX),
         error: output.error,
         reasonCode: output.reasonCode,
         // A turn cut off by policy is not an escalation (ADR-020).
@@ -1416,6 +1425,62 @@ export class BotManager {
     this.store.ensurePermissions(manifest.id);
     this.invalidateRuntime(leadId); // lead's roster + fleet prompt change
     logger.info({ leadId, crewId: spec.id }, 'Crew member added to fleet');
+    return { ok: true, manifest };
+  }
+
+  /**
+   * Attach a bot that already exists to a lead's fleet.
+   *
+   * `addCrew` only creates: a solo bot could not be put under a lead without editing its
+   * manifest by hand, which is exactly what a roster with a "add a member" sheet should spare
+   * you. Adoption is the same relationship as creation — the member's `parent` is the only
+   * state — so the store's `update` moves the profile into the lead's folder and validates the
+   * depth on the way.
+   */
+  adoptCrew(leadId: string, memberId: string): { ok: true; manifest: BotManifest } | { ok: false; error: string } {
+    const lead = this.store.get(leadId);
+    if (!lead) return { ok: false, error: `No bot "${leadId}"` };
+    if (lead.fleetRole !== 'lead') {
+      return { ok: false, error: `**${lead.name}** is not a fleet lead — promote it first` };
+    }
+    const member = this.store.get(memberId);
+    if (!member) return { ok: false, error: `No bot "${memberId}"` };
+    if (member.id === lead.id) return { ok: false, error: 'A bot cannot join its own fleet' };
+    if (member.parent === leadId) return { ok: true, manifest: member };
+    if (member.parent) {
+      return { ok: false, error: `**${member.name}** is already in **${member.parent}**'s fleet — remove it from there first` };
+    }
+    // A bot promoted to lead but leading nobody is still solo: adopting it demotes it, which
+    // is what the owner is asking for. Only a lead with actual members cannot join.
+    const ownCrew = this.store.crewOf(member.id);
+    if (ownCrew.length > 0) {
+      return { ok: false, error: `**${member.name}** leads ${ownCrew.length} équipier(s) — retire them first, or add them to this fleet instead` };
+    }
+    const crew = this.store.crewOf(leadId);
+    const cap = this.maxCrew();
+    if (crew.length >= cap) {
+      return { ok: false, error: `Fleet is at the crew cap (${crew.length}/${cap}) — retire a member first` };
+    }
+    // Depth: the member would take one level below this lead.
+    let ancestor: string | undefined = leadId;
+    let level = 1;
+    const seen = new Set<string>();
+    while (ancestor) {
+      if (seen.has(ancestor)) return { ok: false, error: 'Fleet cycle detected in parent chain' };
+      seen.add(ancestor);
+      if (level >= MAX_FLEET_DEPTH) return { ok: false, error: `Fleet nesting is capped at ${MAX_FLEET_DEPTH} levels` };
+      ancestor = this.store.get(ancestor)?.parent;
+      level += 1;
+    }
+    const canMessage = Array.from(new Set([...(member.comms?.canMessage ?? []), leadId]));
+    const manifest = this.store.update(member.id, (m) => {
+      m.fleetRole = 'crew';
+      m.parent = leadId;
+      m.comms = { ...(m.comms ?? {}), canMessage };
+    });
+    this.invalidateRuntime(leadId);
+    this.invalidateRuntime(member.id);
+    logger.info({ leadId, crewId: member.id }, 'Existing bot adopted into a fleet');
     return { ok: true, manifest };
   }
 

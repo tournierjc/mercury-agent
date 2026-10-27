@@ -393,6 +393,22 @@ app.post('/api/bots/:id/crew', async (c: any) => {
   return c.json({ bot: result.manifest }, 201);
 });
 
+/**
+ * Attach an existing bot to a fleet: `{ memberId }`.
+ *
+ * The roster's "add a member" sheet lists the solo bots this lead can take, and this is what
+ * that list calls. Same validations as creation (lead, cap, depth, not already in a fleet).
+ */
+app.post('/api/bots/:id/crew/adopt', async (c: any) => {
+  if (!botManager) return c.json({ error: 'Bots not available' }, 400);
+  const leadId = c.req.param('id');
+  const body = await c.req.json().catch(() => null) as { memberId?: string } | null;
+  if (!body?.memberId) return c.json({ error: 'memberId is required' }, 400);
+  const result = botManager.adoptCrew(leadId, body.memberId);
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return c.json({ bot: result.manifest });
+});
+
 // Persona (character file) — read + write
 app.get('/api/bots/:id/persona', (c: any) => {
   if (!botManager) return c.json({ error: 'Bots not available' }, 400);

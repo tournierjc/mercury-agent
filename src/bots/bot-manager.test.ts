@@ -901,6 +901,37 @@ describe('Bot fleets (lead + crew)', () => {
     expect(store.list().filter(m => m.parent === 'ceo')).toHaveLength(6);
   });
 
+  it('adoptCrew puts an existing solo bot under a lead, and refuses the impossible cases', () => {
+    setupFleet();
+    store.create({ id: 'veille', name: 'Veille' });
+    store.create({ id: 'autre-chef', name: 'Autre chef', manifest: { fleetRole: 'lead' } });
+    store.create({ id: 'membre-ailleurs', name: 'Membre', manifest: { fleetRole: 'crew', parent: 'autre-chef' } });
+
+    // The nominal case: a solo bot joins, keeping its identity, gaining the lead in comms.
+    const adopted = manager.adoptCrew('ceo', 'veille');
+    expect(adopted).toMatchObject({ ok: true });
+    // Read through the manager's own store: a second BotStore over the same folder would hold
+    // its own manifest cache, and a same-millisecond write aliases to the stale entry.
+    expect(manager.store.get('veille')?.parent).toBe('ceo');
+    expect(manager.store.get('veille')?.fleetRole).toBe('crew');
+    expect(manager.store.get('veille')?.comms?.canMessage).toEqual(['ceo']);
+    // Idempotent: adopting twice is not an error and does not duplicate the crew.
+    expect(manager.adoptCrew('ceo', 'veille')).toMatchObject({ ok: true });
+    expect(manager.store.crewOf('ceo').filter(m => m.id === 'veille')).toHaveLength(1);
+
+    // A lead with members is not free, a member of another fleet is not free, and a bot cannot
+    // join itself. A lead with an empty crew is still a solo bot: it can be taken, and demoted.
+    manager.addCrew('autre-chef', { id: 'sbire', name: 'Sbire' });
+    expect(manager.adoptCrew('ceo', 'autre-chef')).toMatchObject({ ok: false });
+    store.create({ id: 'chef-sans-equipe', name: 'Chef sans équipe', manifest: { fleetRole: 'lead' } });
+    expect(manager.adoptCrew('ceo', 'chef-sans-equipe')).toMatchObject({ ok: true });
+    expect(manager.store.get('chef-sans-equipe')?.fleetRole).toBe('crew');
+    expect(manager.adoptCrew('ceo', 'membre-ailleurs')).toMatchObject({ ok: false });
+    expect(manager.adoptCrew('ceo', 'ceo')).toMatchObject({ ok: false });
+    // Only a lead can adopt.
+    expect(manager.adoptCrew('veille', 'autre-chef')).toMatchObject({ ok: false });
+  });
+
   it('delegated tasks return results to the lead mailbox (attributed)', async () => {
     mockedGenerateText.mockResolvedValue({ text: 'MARKET REPORT: all clear', finishReason: 'stop', usage: { inputTokens: 5, outputTokens: 5 } } as any);
     setupFleet();
