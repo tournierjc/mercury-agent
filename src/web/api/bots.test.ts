@@ -6,7 +6,7 @@ import { getDefaultConfig } from '../../utils/config.js';
 import { BotManager } from '../../bots/bot-manager.js';
 import { BotStore } from '../../bots/store.js';
 import { PERMISSION_TIERS } from '../../bots/permission-tiers.js';
-import app, { registerRosterClient, setBotManager } from './bots.js';
+import app, { setBotManager } from './bots.js';
 
 /**
  * Web cockpit API — handlers tested directly via the module's own Hono app
@@ -213,6 +213,7 @@ describe('web bots API — deliverables folder (where results land)', () => {
     store.create({ id: 'quiet', name: 'Quiet' });
     const seen: RosterFeed = [];
     const unsubscribe = registerRosterClient({ send: (event, data) => seen.push({ event, data: data as RosterBody }) });
+<<<<<<< Updated upstream
   it('a rename reaches every open tab: the feed pushes the new name, not just the reply', async () => {
     // The bug this pins: PATCH answered 200 with the new name, and the drawer — fed by the fleet
     // feed, not by the reply — kept the old one until some unrelated roster change happened.
@@ -273,6 +274,8 @@ describe('web bots API — deliverables folder (where results land)', () => {
       unsubscribe();
     }
   });
+=======
+>>>>>>> 2a00e8e7 (chore(local): integration 1.6.0-local.6 — declared vision capability (Qwen local))
 });
 
 describe('web bots API — avatars', () => {
