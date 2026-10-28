@@ -932,6 +932,22 @@ describe('Bot fleets (lead + crew)', () => {
     expect(manager.adoptCrew('veille', 'autre-chef')).toMatchObject({ ok: false });
   });
 
+  it('detachCrew makes a member solo again, and refuses a bot that is not in that fleet', () => {
+    setupFleet();
+    const detached = manager.detachCrew('ceo', 'writer');
+    expect(detached).toMatchObject({ ok: true });
+    expect(manager.store.get('writer')?.parent).toBeUndefined();
+    expect(manager.store.get('writer')?.fleetRole).toBeUndefined();
+    expect(manager.store.get('writer')?.comms?.canMessage ?? []).toEqual([]);
+    expect(manager.store.crewOf('ceo').map(m => m.id)).not.toContain('writer');
+
+    // Detaching again is not a silent success: the fleet no longer holds it.
+    expect(manager.detachCrew('ceo', 'writer')).toMatchObject({ ok: false });
+    // A bot that was never in that fleet is not ours to release.
+    store.create({ id: 'libre', name: 'Libre' });
+    expect(manager.detachCrew('ceo', 'libre')).toMatchObject({ ok: false });
+  });
+
   it('delegated tasks return results to the lead mailbox (attributed)', async () => {
     mockedGenerateText.mockResolvedValue({ text: 'MARKET REPORT: all clear', finishReason: 'stop', usage: { inputTokens: 5, outputTokens: 5 } } as any);
     setupFleet();

@@ -22,6 +22,7 @@ import { createFleetDelegateTool, createFleetTasksTool, createFleetPipelineTool 
 import { createBotStateTool } from './tools/bot-state.js';
 import { extractBotMemories } from './memory-extract.js';
 import { runBotDoctor, type DoctorReport } from './doctor.js';
+import type { ChannelAttachment } from '../types/channel.js';
 import { createBotDeliverTool } from './tools/bot-deliver.js';
 import { createBotScheduleTool, type BotScheduler } from './tools/bot-schedule.js';
 import { createFleetStatusTool } from './tools/fleet-status.js';
@@ -57,6 +58,13 @@ export interface BotJob {
   source?: { channelType: string; channelId: string };
   /** 'chat' answers the owner in the app; 'work' (default) delivers. */
   mode?: 'work' | 'chat';
+  /**
+   * Photos and PDFs for this turn, already stored on disk (`web/api/uploads.ts`).
+   * In-memory only: a job that survives a restart loses its files rather than pointing at paths
+   * that may be gone — the durable record has no column for them, and a stale path is worse than
+   * a missing one.
+   */
+  attachments?: ChannelAttachment[];
   createdAt: number;
   attempts: number;
   /** Scheduler task id for cron runs (routine gating + no-outcome streaks). */
@@ -401,7 +409,7 @@ export class BotManager {
     return this.journalFor(botId);
   }
 
-  enqueue(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; mode?: 'work' | 'chat' }): { jobId: string; accepted: boolean; reasonCode?: string } {
+  enqueue(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; mode?: 'work' | 'chat'; attachments?: ChannelAttachment[] }): { jobId: string; accepted: boolean; reasonCode?: string } {
     const manifest = this.store.get(botId);
     if (!manifest) return { jobId: '', accepted: false, reasonCode: 'target_unknown' };
     if (!manifest.enabled || this.disabled.has(botId)) return { jobId: '', accepted: false, reasonCode: 'target_disabled' };
@@ -455,7 +463,7 @@ export class BotManager {
     // `mode` travels with the in-memory job too: the durable record and the queue are two
     // copies of the same job, and a field forgotten in one of them silently turns a chat turn
     // back into a work turn (which is how a teammate answered "Nothing to do" to a question).
-    queue.push({ id, botId, trigger: job.trigger, prompt: job.prompt, fromBot: job.fromBot, source: job.source, mode: job.mode, createdAt: durable.job.createdAt, attempts: durable.job.attempts, routineId: job.routineId });
+    queue.push({ id, botId, trigger: job.trigger, prompt: job.prompt, fromBot: job.fromBot, source: job.source, mode: job.mode, attachments: job.attachments, createdAt: durable.job.createdAt, attempts: durable.job.attempts, routineId: job.routineId });
     this.pump(botId);
     return { jobId: id, accepted: true };
   }
@@ -1132,6 +1140,7 @@ export class BotManager {
         trigger: job.trigger,
         mode: job.mode,
         prompt: job.prompt,
+        attachments: job.attachments,
         persona: this.store.readPersona(botId),
         mail,
         pollMail: () => this.drainMailbox(botId),
@@ -1481,6 +1490,34 @@ export class BotManager {
     this.invalidateRuntime(leadId);
     this.invalidateRuntime(member.id);
     logger.info({ leadId, crewId: member.id }, 'Existing bot adopted into a fleet');
+    return { ok: true, manifest };
+  }
+
+  /**
+   * Take a bot out of a lead's fleet: it becomes solo again.
+   *
+   * The `parent` is the only state, so removing it is the whole operation — the store's
+   * `update` moves the profile back to the root and fires the relocation hook, exactly as
+   * adoption moved it in. The lead is dropped from `comms.canMessage` so the detached bot does
+   * not keep a channel it no longer has.
+   */
+  detachCrew(leadId: string, memberId: string): { ok: true; manifest: BotManifest } | { ok: false; error: string } {
+    const lead = this.store.get(leadId);
+    if (!lead) return { ok: false, error: `No bot "${leadId}"` };
+    const member = this.store.get(memberId);
+    if (!member) return { ok: false, error: `No bot "${memberId}"` };
+    if (member.parent !== leadId) {
+      return { ok: false, error: `**${member.name}** is not in **${lead.name}**'s fleet` };
+    }
+    const canMessage = (member.comms?.canMessage ?? []).filter((id) => id !== leadId);
+    const manifest = this.store.update(memberId, (m) => {
+      delete m.parent;
+      delete m.fleetRole;
+      m.comms = { ...(m.comms ?? {}), canMessage };
+    });
+    this.invalidateRuntime(leadId);
+    this.invalidateRuntime(memberId);
+    logger.info({ leadId, crewId: memberId }, 'Crew member detached from its fleet');
     return { ok: true, manifest };
   }
 
