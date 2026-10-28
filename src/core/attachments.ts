@@ -37,30 +37,8 @@ export function modelSeesImages(provider: string, model: string, declared?: bool
   if (declared !== undefined) return declared;
   const m = model.toLowerCase();
   if (provider === 'deepseek') return false;
-  const declared = visionOverride(provider);
-  if (declared !== undefined) return declared;
   if (/gpt-4o|gpt-4\.1|gpt-5|chatgpt-4o|\bo[134](-|$)|claude|gemini|pixtral|llava|qwen.*vl|vision|grok-(2-vision|4)|llama-?4|mistral-(medium|small)-3|gemma-?3/.test(m)) return true;
   return false;
-}
-
-/**
- * The owner's declaration, when the guess cannot know.
- *
- * The name test above can only recognise models it has heard of, so a self-hosted vision model
- * called `qwen3.8-flash-next` was refused its pixels. One variable per OpenAI-compatible provider
- * lets the declaration win: `true`/`1` takes images, `false`/`0` refuses them, anything else falls
- * back to the name test.
- */
-function visionOverride(provider: string): boolean | undefined {
-  const raw =
-    provider === 'openaiCompat' ? process.env.OPENAI_COMPAT_VISION
-    : provider === 'litellm' ? process.env.LITELLM_VISION
-    : provider === 'lmstudio' || provider === 'lmStudio' ? process.env.LM_STUDIO_VISION
-    : undefined;
-  const v = raw?.trim().toLowerCase();
-  if (v === 'true' || v === '1') return true;
-  if (v === 'false' || v === '0') return false;
-  return undefined;
 }
 
 /** Models that accept PDF documents directly. */
