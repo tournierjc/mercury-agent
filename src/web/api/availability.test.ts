@@ -4,6 +4,11 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import system, { setScheduler } from './system.js';
 import status, { getStatus, updateStatus } from './status.js';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import system, { setScheduler } from './system.js';
+import status from './status.js';
 import type { Scheduler } from '../../core/scheduler.js';
 
 /**
@@ -65,13 +70,17 @@ describe('GET /api/usage', () => {
     try {
       const res = await system.request('/api/usage');
       const body = (await res.json()) as Record<string, unknown>;
-
       expect(body.available).toBe(true);
       expect(body.dailyUsed).toBe(1234);
       expect(body.dailyBudget).toBe(80000000);
     } finally {
       updateStatus({ tokenBudget: live });
     }
+    const res = await system.request('/api/usage');
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.available).toBe(true);
+    expect(body.dailyUsed).toBe(1234);
+    expect(body.dailyBudget).toBe(80000000);
   });
 
   it('is NOT available when the tracker exists and cannot be read', async () => {

@@ -417,3 +417,60 @@ describe('web bots API — files on a bot message', () => {
     await expect(jreq(res)).resolves.toEqual({ error: 'message is required' });
   });
 });
+
+describe('web bots API — rename', () => {
+  const post = (body: unknown) =>
+    app.request('/api/bots', { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
+  const patch = (id: string, body: unknown) =>
+    app.request(`/api/bots/${id}`, { method: 'PATCH', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
+
+  it('renames a bot, keeping its id and its folder', async () => {
+    await post({ id: 'probe', name: 'Probe A' });
+
+    const res = await patch('probe', { name: 'Probe B' });
+    expect(res.status).toBe(200);
+    const { bot } = await jreq(res);
+    expect(bot.id).toBe('probe');
+    expect(bot.name).toBe('Probe B');
+    // The display name is what the roster and the app read, and it is persisted, not just echoed.
+    expect(manager.store.get('probe')?.name).toBe('Probe B');
+    expect(readFileSync(join(root, 'bots', 'probe', 'bot.yaml'), 'utf-8')).toContain('name: Probe B');
+    expect(existsSync(join(root, 'bots', 'probe'))).toBe(true);
+  });
+
+  it('normalises the name and refuses one that is only whitespace', async () => {
+    await post({ id: 'spaced', name: 'Spaced' });
+
+    const { bot } = await jreq(await patch('spaced', { name: '  Mac   Web  ' }));
+    expect(bot.name).toBe('Mac Web');
+
+    const empty = await patch('spaced', { name: '   ' });
+    expect(empty.status).toBe(400);
+    expect(manager.store.get('spaced')?.name).toBe('Mac Web');
+  });
+
+  it('does not let a patch move the identity: the id is ignored', async () => {
+    await post({ id: 'fixed', name: 'Fixed' });
+
+    const { bot } = await jreq(await patch('fixed', { id: 'moved', name: 'Still fixed' }));
+    expect(bot.id).toBe('fixed');
+    expect(manager.store.exists('moved')).toBe(false);
+    expect(manager.store.get('fixed')?.name).toBe('Still fixed');
+  });
+
+  it('a rename moves the label, not the files: the deliverables folder is pinned once', async () => {
+    await post({ id: 'deliv', name: 'Deliv A' });
+    const before = store.pinDeliverablesFolder('deliv');
+    mkdirSync(before, { recursive: true });
+    writeFileSync(join(before, 'report.md'), '# ok');
+
+    const res = await patch('deliv', { name: 'Deliv B' });
+    expect(res.status).toBe(200);
+
+    const after = store.deliverablesDir('deliv');
+    expect(after).toBe(before);
+    expect(existsSync(join(after, 'report.md'))).toBe(true);
+    // The pointer is written next to the bot, so a restart does not recompute it from the name.
+    expect(readFileSync(join(root, 'bots', 'deliv', 'bot.yaml'), 'utf-8')).toContain('deliverablesFolder: Deliv A');
+  });
+});
