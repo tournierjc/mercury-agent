@@ -74,6 +74,17 @@ app.post('/api/bots', async (c: any) => {
 /** Open fleet-feed clients — roster mutations (add crew, promote, delete) push fresh snapshots. */
 const rosterSseClients = new Set<{ send: (event: string, data: unknown) => void }>();
 
+/**
+ * Subscribes a client to the fleet feed, and returns its unsubscribe.
+ *
+ * Exported so a test can stand where a browser tab stands: the point of a broadcast is that
+ * *someone else's* screen updates, which no assertion on a PATCH reply can show.
+ */
+export function registerRosterClient(client: { send: (event: string, data: unknown) => void }): () => void {
+  rosterSseClients.add(client);
+  return () => { rosterSseClients.delete(client); };
+}
+
 function broadcastRoster(): void {
   if (!botManager) return;
   for (const client of rosterSseClients) {
@@ -229,6 +240,9 @@ app.patch('/api/bots/:id', async (c: any) => {
       if (patch.retention !== undefined) m.retention = patch.retention;
     });
     botManager.invalidateRuntime(id);
+    // A config edit is roster news: the name, the model, the enabled flag and the autonomy limits
+    // all travel in the summaries, and an open drawer otherwise kept the old value.
+    broadcastRoster();
     return c.json({ bot: updated });
   } catch (err: any) {
     return c.json({ error: err?.message ?? 'Failed to update bot' }, 400);

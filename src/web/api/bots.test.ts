@@ -6,7 +6,7 @@ import { getDefaultConfig } from '../../utils/config.js';
 import { BotManager } from '../../bots/bot-manager.js';
 import { BotStore } from '../../bots/store.js';
 import { PERMISSION_TIERS } from '../../bots/permission-tiers.js';
-import app, { setBotManager } from './bots.js';
+import app, { registerRosterClient, setBotManager } from './bots.js';
 
 /**
  * Web cockpit API — handlers tested directly via the module's own Hono app
@@ -220,6 +220,7 @@ describe('web bots API — deliverables folder (where results land)', () => {
     store.create({ id: 'scribed', name: 'Scribe' });
     const seen: Array<{ event: string; data: any }> = [];
     const unsubscribe = registerRosterClient({ send: (event, data) => seen.push({ event, data }) });
+    const unsubscribe = registerRosterClient({ send: (event: string, data: any) => seen.push({ event, data }) });
     try {
       const res = await app.request('/api/bots/scribed', {
         method: 'PATCH',
@@ -238,7 +239,7 @@ describe('web bots API — deliverables folder (where results land)', () => {
   it('a config edit that the roster shows (the enabled flag) is announced too', async () => {
     store.create({ id: 'quiet', name: 'Quiet' });
     const seen: Array<{ event: string; data: any }> = [];
-    const unsubscribe = registerRosterClient({ send: (event, data) => seen.push({ event, data }) });
+    const unsubscribe = registerRosterClient({ send: (event: string, data: any) => seen.push({ event, data }) });
 
     try {
       await app.request('/api/bots/quiet', {
@@ -275,7 +276,7 @@ describe('web bots API — deliverables folder (where results land)', () => {
     }
   });
 =======
->>>>>>> 2a00e8e7 (chore(local): integration 1.6.0-local.6 — declared vision capability (Qwen local))
+>>>>>>> ef1b7150 (fix(usage): le budget affiché est celui que le moteur applique)
 });
 
 describe('web bots API — avatars', () => {

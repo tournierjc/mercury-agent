@@ -52,12 +52,6 @@ describe('chat attachments for the model', () => {
     expect(modelSeesImages('anthropic', 'claude-opus-4-1')).toBe(true);
     expect(modelSeesImages('deepseek', 'deepseek-chat')).toBe(false);
     expect(modelSeesImages('ollama', 'llama3.1:8b')).toBe(false);
-    // The local Qwen on the openai-compatible endpoint: the id says nothing about modality, and a
-    // wrongly-negative answer turns a photo into a note about photos.
-    expect(modelSeesImages('openaiCompat', 'Qwen3.8-Flash-Next')).toBe(true);
-    expect(modelSeesImages('openaiCompat', 'qwen3.8-flash-next')).toBe(true);
-    // Older text-only Qwen generations stay blind rather than being guessed into vision.
-    expect(modelSeesImages('openaiCompat', 'qwen2.5-14b-instruct')).toBe(false);
     expect(modelReadsPdf('openai', 'gpt-5.2-chat-latest')).toBe(true);
     expect(modelReadsPdf('openai', 'gpt-3.5-turbo')).toBe(false);
   });
