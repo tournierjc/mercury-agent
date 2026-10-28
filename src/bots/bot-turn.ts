@@ -7,6 +7,7 @@ import type { CapabilityRegistry } from '../capabilities/registry.js';
 import type { UserMemoryStore } from '../memory/user-memory.js';
 import type { TokenBudget } from '../utils/tokens.js';
 import type { BaseProvider } from '../providers/base.js';
+import { withAttachments } from '../core/attachments.js';
 import { classifyStreamCompletion } from '../core/stream-completion.js';
 import { stepsExhaustedPrompt } from '../core/completion-verdict.js';
 import { isFailedToolResult } from '../core/execute-guard.js';
@@ -14,6 +15,7 @@ import { MAX_AUTOMATIC_CONTINUATIONS } from '../core/execution-limits.js';
 import { formatToolStep } from '../utils/tool-label.js';
 import { logger } from '../utils/logger.js';
 import type { BotManifest, BotTrigger } from './types.js';
+import type { ChannelAttachment } from '../types/channel.js';
 
 /** Mailbox messages injected mid-turn (bot-to-bot or queued user input). */
 export interface BotTurnMail {
@@ -96,6 +98,7 @@ export interface BotTurnInput {
    * a caption-less photo becomes `(Attached: names)` because a provider rejects an
    * empty text block, and a model without vision gets a note instead of pixels.
    */
+  /** Photos and PDFs handed to this turn; absent for every unattended wake. */
   attachments?: ChannelAttachment[];
   persona: string;
   /** Pending mailbox messages at turn start (attributed bot-to-bot handoffs). */
@@ -223,7 +226,7 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
   const startedAt = Date.now();
 
   const system = buildBotSystemPrompt(input);
-  const messages: ModelMessage[] = [];
+  let messages: ModelMessage[] = [];
 
   for (const m of input.mail) {
     messages.push({ role: 'user', content: `Message from 🤖 ${m.from}:\n\n${m.content}` });
@@ -250,6 +253,23 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
     } as never;
     const withFiles = withAttachments(messages, turnMessage, provider.name, provider.getModel(), provider.seesImages);
     messages.splice(0, messages.length, ...withFiles);
+  }
+
+  // A photo is a part of the user message, not a path to read: the same helper the chat uses
+  // decides whether this model takes images at all, so a bot and a chat cannot disagree. It
+  // rewrites the array in place (the loop appends to it between steps, and a snapshot would
+  // resend the first prompt forever).
+  if (input.attachments?.length) {
+    messages = withAttachments(messages, {
+      id: input.jobId ?? 'bot-turn',
+      channelId: input.manifest.id,
+      channelType: 'internal',
+      senderId: 'owner',
+      senderName: 'Owner',
+      content: input.prompt,
+      timestamp: Date.now(),
+      metadata: { attachments: input.attachments },
+    }, provider.name, provider.getModel());
   }
 
   let tokensIn = 0;

@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // Mock only streamText; stepCountIs must stay real so the turn loop's
 // per-round step budget still applies. The mock must drive onStepFinish
@@ -432,23 +435,51 @@ describe('shared-folder write budget', () => {
 
 describe('turnCaption — files without a caption', () => {
   const img = { kind: 'image' as const, path: '/tmp/a.png', mime: 'image/png', name: 'a.png' };
-
   it('keeps a real prompt untouched', () => {
     expect(turnCaption('  describe this  ', [img])).toBe('describe this');
   });
-
   it('names the files when there is no text at all', () => {
     // An empty text block is rejected by providers: the photo says what it is.
     expect(turnCaption('', [img])).toBe('(Attached: a.png)');
     expect(turnCaption('   ', [img, { ...img, name: 'b.pdf', kind: 'document' as const }]))
       .toBe('(Attached: a.png, b.pdf)');
   });
-
   it('falls back to "file" when a name is missing, never to an empty string', () => {
     expect(turnCaption('', [{ kind: 'image', path: '/tmp/x.webp' }])).toBe('(Attached: file)');
   });
-
   it('stays empty with neither text nor files', () => {
     expect(turnCaption('', [])).toBe('');
+describe('runBotTurn with a photo', () => {
+  // A real file: the helper reads the bytes, so a fake path would only test the fake.
+  const png = join(mkdtempSync(join(tmpdir(), 'bot-turn-png-')), 'dot.png');
+  writeFileSync(png, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
+  const file = [{ kind: 'image' as const, path: png, mime: 'image/png', name: 'dot.png' }];
+  it('hands the image to a model that sees, as a part of the user message', async () => {
+    process.env.OPENAI_COMPAT_VISION = 'true';
+    mockedStreamText.mockImplementation(impl(() => finished('vu')));
+    await runBotTurn(turnInput({
+      prompt: 'Revois cette capture',
+      attachments: file,
+      provider: { name: 'openaiCompat', getModel: () => 'qwen3.8-flash-next', getModelInstance: () => ({}) },
+      manifest: { id: 'oeil', name: 'Œil', enabled: true, autonomy: { maxSteps: 1 } },
+    }));
+    delete process.env.OPENAI_COMPAT_VISION;
+    const opts = mockedStreamText.mock.calls[0][0] as any;
+    const carrying = opts.messages.filter((m: any) => Array.isArray(m.content));
+    expect(carrying).toHaveLength(1);
+    expect(carrying[0].content[0]).toMatchObject({ type: 'text', text: 'Revois cette capture' });
+    expect(carrying[0].content.some((part: any) => part.type === 'image' && part.mediaType === 'image/png')).toBe(true);
+  });
+  it('tells a text-only model what it is missing instead of pretending', async () => {
+    mockedStreamText.mockImplementation(impl(() => finished('je ne vois pas')));
+    await runBotTurn(turnInput({
+      prompt: 'Revois cette capture',
+      attachments: file,
+    }));
+    const opts = mockedStreamText.mock.calls[0][0] as any;
+    const carrying = opts.messages.filter((m: any) => Array.isArray(m.content));
+    expect(carrying).toHaveLength(1);
+    expect(String(carrying[0].content[0].text)).toContain("can't view images");
+    expect(carrying[0].content.some((part: any) => part.type === 'image')).toBe(false);
   });
 });

@@ -55,6 +55,30 @@ describe('chat attachments for the model', () => {
     expect(modelReadsPdf('openai', 'gpt-5.2-chat-latest')).toBe(true);
     expect(modelReadsPdf('openai', 'gpt-3.5-turbo')).toBe(false);
   });
+
+  it('the owner can declare what the name cannot say', () => {
+    // A self-hosted vision model whose name is not in the regex list: refused by default…
+    delete process.env.OPENAI_COMPAT_VISION;
+    expect(modelSeesImages('openaiCompat', 'qwen3.8-flash-next')).toBe(false);
+    // …accepted when the owner says so, refused again when the owner says no.
+    process.env.OPENAI_COMPAT_VISION = 'true';
+    expect(modelSeesImages('openaiCompat', 'qwen3.8-flash-next')).toBe(true);
+    expect(modelSeesImages('openaiCompat', 'gpt-4o')).toBe(true);
+    process.env.OPENAI_COMPAT_VISION = 'false';
+    expect(modelSeesImages('openaiCompat', 'gpt-4o')).toBe(false);
+    process.env.OPENAI_COMPAT_VISION = 'maybe';
+    expect(modelSeesImages('openaiCompat', 'gpt-4o')).toBe(true);
+    // The declaration is per provider: it must not leak to a provider that reads no variable.
+    delete process.env.OPENAI_COMPAT_VISION;
+    process.env.LM_STUDIO_VISION = 'true';
+    expect(modelSeesImages('lmstudio', 'some-local-model')).toBe(true);
+    expect(modelSeesImages('openaiCompat', 'qwen3.8-flash-next')).toBe(false);
+    delete process.env.LM_STUDIO_VISION;
+    // deepseek never takes images, declaration or not.
+    process.env.OPENAI_COMPAT_VISION = 'true';
+    expect(modelSeesImages('deepseek', 'deepseek-vl')).toBe(false);
+    delete process.env.OPENAI_COMPAT_VISION;
+  });
 });
 
 describe('a declared capability beats the name-based guess', () => {

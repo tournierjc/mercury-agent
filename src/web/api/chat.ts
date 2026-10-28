@@ -8,6 +8,9 @@ import type { ProgrammingMode, ProgrammingModeState } from '../../core/programmi
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { join, extname, basename, relative, resolve } from 'node:path';
 import { getMercuryHome, loadConfig, getActiveProviders } from '../../utils/config.js';
+import type { ProviderConfig } from '../../utils/config.js';
+import { fetchProviderModelCatalog } from '../../utils/provider-models.js';
+import { logger } from '../../utils/logger.js';
 import type { SessionRepository } from '../../sessions/index.js';
 import { loadPermissionMode, savePermissionMode } from '../../capabilities/permission-mode-store.js';
 import {
@@ -423,10 +426,24 @@ async function listChatGPTModels(): Promise<string[]> {
 }
 
 /** Providers that serve many models list each one; others list their configured model. */
-async function listProviderModels(p: { name: string; baseUrl: string }): Promise<string[]> {
+/**
+ * The models a provider actually offers, not just the one it is configured with.
+ *
+ * This returned `[]` for every OpenAI-compatible provider (deepseek, openaiCompat, litellm…), so
+ * the picker showed a single entry per provider and a model like deepseek-pro never appeared.
+ * `fetchProviderModelCatalog` is the same call the provider card's "test" uses, so the list is
+ * whatever `GET {baseUrl}/models` answers; a provider that refuses it keeps its configured model.
+ */
+async function listProviderModels(p: ProviderConfig): Promise<string[]> {
   if (p.name === 'ollamaLocal') return listOllamaModels(p.baseUrl);
   if (p.name === 'chatgptWeb') return [...(await listChatGPTModels())];
-  return [];
+  try {
+    const catalog = await fetchProviderModelCatalog(p.name as Parameters<typeof fetchProviderModelCatalog>[0], p);
+    return catalog.models;
+  } catch (err) {
+    logger.debug({ provider: p.name, err }, 'Model catalogue unavailable — configured model only');
+    return [];
+  }
 }
 
 /** What the picker needs to show a model in plain language. */
