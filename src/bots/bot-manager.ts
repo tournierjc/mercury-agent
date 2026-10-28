@@ -1155,6 +1155,7 @@ export class BotManager {
         tools,
         userMemory,
         provider: resolveProvider(this.providers, manifest, this.config),
+        visionDeclared: (resolveProvider(this.providers, manifest, this.config) as { seesImages?: boolean }).seesImages,
         tokenBudget: this.tokenBudget,
         abortSignal: signal,
       },

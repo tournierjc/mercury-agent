@@ -99,6 +99,8 @@ export interface BotTurnInput {
    * empty text block, and a model without vision gets a note instead of pixels.
    */
   attachments?: ChannelAttachment[];
+  /** The owner's declaration about this model's vision, when there is one. */
+  visionDeclared?: boolean;
   persona: string;
   /** Pending mailbox messages at turn start (attributed bot-to-bot handoffs). */
   mail: BotTurnMail[];
@@ -250,25 +252,8 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
       timestamp: Date.now(),
       metadata: { attachments: files },
     } as never;
-    const withFiles = withAttachments(messages, turnMessage, provider.name, provider.getModel());
+    const withFiles = withAttachments(messages, turnMessage, provider.name, provider.getModel(), input.visionDeclared);
     messages.splice(0, messages.length, ...withFiles);
-  }
-
-  // A photo is a part of the user message, not a path to read: the same helper the chat uses
-  // decides whether this model takes images at all, so a bot and a chat cannot disagree. It
-  // rewrites the array in place (the loop appends to it between steps, and a snapshot would
-  // resend the first prompt forever).
-  if (input.attachments?.length) {
-    messages = withAttachments(messages, {
-      id: input.jobId ?? 'bot-turn',
-      channelId: input.manifest.id,
-      channelType: 'internal',
-      senderId: 'owner',
-      senderName: 'Owner',
-      content: input.prompt,
-      timestamp: Date.now(),
-      metadata: { attachments: input.attachments },
-    }, provider.name, provider.getModel());
   }
 
   let tokensIn = 0;
