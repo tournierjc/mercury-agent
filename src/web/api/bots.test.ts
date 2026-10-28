@@ -213,6 +213,31 @@ describe('web bots API — deliverables folder (where results land)', () => {
     store.create({ id: 'quiet', name: 'Quiet' });
     const seen: RosterFeed = [];
     const unsubscribe = registerRosterClient({ send: (event, data) => seen.push({ event, data: data as RosterBody }) });
+  it('a rename reaches every open tab: the feed pushes the new name, not just the reply', async () => {
+    // The bug this pins: PATCH answered 200 with the new name, and the drawer — fed by the fleet
+    // feed, not by the reply — kept the old one until some unrelated roster change happened.
+    store.create({ id: 'scribed', name: 'Scribe' });
+    const seen: Array<{ event: string; data: any }> = [];
+    const unsubscribe = registerRosterClient({ send: (event, data) => seen.push({ event, data }) });
+    try {
+      const res = await app.request('/api/bots/scribed', {
+        method: 'PATCH',
+        body: JSON.stringify({ name: 'Chroniqueur' }),
+        headers: { 'Content-Type': 'application/json' },
+      });
+      expect(res.status).toBe(200);
+      const roster = seen.filter((e) => e.event === 'bot_roster').at(-1);
+      expect(roster, 'no roster event after the rename').toBeTruthy();
+      const renamed = roster!.data.bots.find((b: any) => b.id === 'scribed');
+      expect(renamed.name).toBe('Chroniqueur');
+    } finally {
+      unsubscribe();
+    }
+  });
+  it('a config edit that the roster shows (the enabled flag) is announced too', async () => {
+    store.create({ id: 'quiet', name: 'Quiet' });
+    const seen: Array<{ event: string; data: any }> = [];
+    const unsubscribe = registerRosterClient({ send: (event, data) => seen.push({ event, data }) });
 
     try {
       await app.request('/api/bots/quiet', {
@@ -225,6 +250,7 @@ describe('web bots API — deliverables folder (where results land)', () => {
       // the description belongs to the bot's own page.
       const roster = seen.filter((e) => e.event === 'bot_roster').at(-1);
       const edited = roster?.data.bots.find((b) => b.id === 'quiet');
+      const edited = roster?.data.bots.find((b: any) => b.id === 'quiet');
       expect(edited?.enabled).toBe(false);
     } finally {
       unsubscribe();
@@ -234,7 +260,6 @@ describe('web bots API — deliverables folder (where results land)', () => {
   it('a rejected edit is not announced — no phantom refresh on an unknown bot', async () => {
     const seen: RosterFeed = [];
     const unsubscribe = registerRosterClient({ send: (event, data) => seen.push({ event, data: data as RosterBody }) });
-
     try {
       const res = await app.request('/api/bots/ghost', {
         method: 'PATCH',
@@ -248,7 +273,6 @@ describe('web bots API — deliverables folder (where results land)', () => {
       unsubscribe();
     }
   });
-
 });
 
 describe('web bots API — avatars', () => {
