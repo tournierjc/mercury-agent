@@ -522,6 +522,19 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
       return governedFailure(governorReason, lastResult?.text, limits, baseOutput(), input, trace, deliveries, expects, emit, stepIndex);
     }
     const message = err instanceof Error ? err.message : String(err);
+    // A provider that answers HTTP 200 with a body the SDK cannot parse says nothing about *why*:
+    // `Failed to process successful response` is all the owner sees, and the body that would explain
+    // it is dropped with the error. Keep it (redacted by the logger's serializers) for the post-mortem.
+    const providerError = err as { statusCode?: number; url?: string; responseBody?: string; cause?: unknown };
+    logger.error({
+      botId: input.manifest.id,
+      stepIndex,
+      statusCode: providerError?.statusCode,
+      url: providerError?.url,
+      errorMessage: message,
+      responseBody: typeof providerError?.responseBody === 'string' ? providerError.responseBody.slice(0, 8000) : undefined,
+      cause: providerError?.cause instanceof Error ? providerError.cause.message : undefined,
+    }, 'Bot turn failed');
     emit({ kind: 'turn-end', stepIndex, label: `failed: ${message.slice(0, 80)}`, status: 'error' });
     return {
       status: 'failed',
