@@ -72,6 +72,18 @@ export class TokenBudget {
     return safeNumber(this.dailyBudget) > 0;
   }
 
+  /**
+   * A budget of zero (or less) is not a ceiling, it is the absence of one.
+   *
+   * The console has always read `dailyBudget: 0` as "unlimited", and an owner who clears the
+   * field in the app means the same thing. Comparing `used >= 0` instead turned that request
+   * into "every turn is refused from the first token" — a config that reads as *no limit* and
+   * behaves as *no answers*, with nothing in the UI able to tell the two apart.
+   */
+  private hasCeiling(): boolean {
+    return safeNumber(this.dailyBudget) > 0;
+  }
+
   canAfford(estimatedTokens: number): boolean {
     this.resetIfNewDay();
     if (!this.hasCeiling()) return true;
