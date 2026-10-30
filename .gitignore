@@ -16,3 +16,6 @@ website/static/install.ps1
 
 # plugin-system tests (src/plugins/test-fixtures.ts)
 .vitest-tmp/
+
+# Build output: the tarball is produced per build, never stored in the tree.
+cosmicstack-mercury-agent-*.tgz
