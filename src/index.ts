@@ -91,7 +91,8 @@ import { selectWithArrowKeys } from './utils/arrow-select.js';
 import { ProviderModelFetchError, fetchProviderModelCatalog } from './utils/provider-models.js';
 import { initCloudTokenStore } from './cloud/token-store.js';
 import { clearCloudRuntimeOnline, markCloudRuntimeOnline } from './cloud/runtime-status.js';
-import { startWebServer, stopWebServer, updateStatus as updateWebStatus, setUserMemory as setWebUserMemory, setWebChannel as setWebWebChannel, setScheduler as setWebScheduler, setAgentSupervisor as setWebSupervisor, setBackgroundTaskManager as setWebBgTasks, setSpotifyClient as setWebSpotify, setProgrammingMode as setWebProgrammingMode, setModelSwitchCallback as setWebModelSwitch, setCurrentProviderCallback as setWebCurrentProvider, setStatusSnapshotCallback as setWebStatusSnapshot, setKanbanSupervisor as setWebKanban, setKanbanBoardManager as setWebBoardManager, setKanbanProviders as setWebKanbanProviders, setIDEProviders as setWebIDEProviders, setSessionRepository as setWebSessions, setSessionSyncEnabledCallback as setWebSessionSyncEnabled, setBotManager as setWebBotManager, setBotsWebhookSecret, setShutdownHandler, setMcpManager as setWebMcpManager } from './web/server.js';
+import { SandboxTools, toolsPath } from './sandbox/tools.js';
+import { startWebServer, stopWebServer, updateStatus as updateWebStatus, setUserMemory as setWebUserMemory, setWebChannel as setWebWebChannel, setScheduler as setWebScheduler, setAgentSupervisor as setWebSupervisor, setBackgroundTaskManager as setWebBgTasks, setSpotifyClient as setWebSpotify, setProgrammingMode as setWebProgrammingMode, setModelSwitchCallback as setWebModelSwitch, setCurrentProviderCallback as setWebCurrentProvider, setStatusSnapshotCallback as setWebStatusSnapshot, setKanbanSupervisor as setWebKanban, setKanbanBoardManager as setWebBoardManager, setKanbanProviders as setWebKanbanProviders, setIDEProviders as setWebIDEProviders, setSessionRepository as setWebSessions, setSessionSyncEnabledCallback as setWebSessionSyncEnabled, setBotManager as setWebBotManager, setSandboxTools, setBotsWebhookSecret, setShutdownHandler, setMcpManager as setWebMcpManager } from './web/server.js';
 import { isWebAuthInitialized, setWebPassword, writeAttachToken } from './web/auth.js';
 import { startLoopLagMonitor } from './utils/loop-lag.js';
 import { McpManager, probeMcpServer, validateMcpConfig, type McpServerStatus } from './capabilities/mcp/index.js';
@@ -2758,6 +2759,18 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
     pluginManager.setRunsPlugins(true);
     pluginManager.setNotifier((m) => agent.notifyAllChannels(m));
     void pluginManager.boot().catch((err) => logger.error({ err }, 'Plugin boot failed'));
+  }
+
+  // Tools installed from the phone land in ~/.mercury/tools/bin (the mounted volume, so they
+  // survive a container upgrade). Putting that directory on the daemon's PATH is what makes a bot's
+  // `run_command` find them: there is no per-bot process to configure. Registered before the fleet,
+  // so the screen answers even when bots are disabled.
+  {
+    const dir = toolsPath();
+    if (!process.env.PATH?.split(':').includes(dir)) {
+      process.env.PATH = `${dir}:${process.env.PATH ?? ''}`;
+    }
+    setSandboxTools(new SandboxTools());
   }
 
   // Mercury Bots: fleet manager runs outside the main message queue.
