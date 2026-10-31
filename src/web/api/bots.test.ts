@@ -458,3 +458,41 @@ describe('web bots API — rename', () => {
     expect(readFileSync(join(root, 'bots', 'deliv', 'bot.yaml'), 'utf-8')).toContain('deliverablesFolder: Deliv A');
   });
 });
+
+describe('web bots API — the conversation register', () => {
+  const post = (path: string, body: unknown) =>
+    app.request(path, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
+
+  const onboard = (id: string) => post('/api/bots', { id, name: id, tier: 'builder' });
+
+  it("accepts a message in the owner's conversation with the chat trigger", async () => {
+    await onboard('talker');
+    const enqueued: Array<Record<string, unknown>> = [];
+    const real = manager.enqueue.bind(manager);
+    manager.enqueue = ((botId: string, job: never) => {
+      enqueued.push({ botId, ...(job as object) });
+      return real(botId, job);
+    }) as never;
+
+    const res = await post('/api/bots/talker/chat', { message: 'et le graphe ?' });
+    expect(res.status).toBe(202);
+    const body = await jreq(res);
+    expect(body).toMatchObject({ accepted: true, status: 'accepted' });
+    expect(typeof body.jobId).toBe('string');
+    // The register is carried by the trigger: `chat` asks for an answer, where `api` asks for work
+    // and reads "Nothing to do" as a failed run.
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]).toMatchObject({ botId: 'talker', trigger: 'chat', prompt: 'et le graphe ?', mode: 'chat' });
+  });
+
+  it('refuses a message with no text', async () => {
+    await onboard('talker');
+    expect((await post('/api/bots/talker/chat', {})).status).toBe(400);
+  });
+
+  it('answers 409 with the reason when the bot cannot take the turn', async () => {
+    const res = await post('/api/bots/ghost/chat', { message: 'coucou' });
+    expect(res.status).toBe(409);
+    expect(await jreq(res)).toMatchObject({ accepted: false, reasonCode: 'target_unknown' });
+  });
+});
