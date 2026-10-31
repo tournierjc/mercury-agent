@@ -162,13 +162,7 @@ export const defaultRunner: Runner = (cmd, { timeoutMs, onOutput }) =>
   });
 
 /** Where installs land — inside the mounted home, so they survive a container upgrade. */
-export function toolsDir(): string {
-  return join(process.env.MERCURY_TOOLS_DIR?.trim() || join(homedir(), '.mercury', 'tools'));
-}
-
-export function toolsPath(): string {
-  return join(toolsDir(), 'bin');
-}
+export { toolsDir, toolsPath } from './paths.js';
 
 export class SandboxTools {
   private readonly dir: string;
