@@ -75,7 +75,8 @@ export const TOOL_CATALOG: ToolDef[] = [
     label: 'Azure CLI',
     description: 'Ressources Azure, en lecture comme en écriture.',
     bin: 'az',
-    versionArgs: ['az', 'version'],
+    // `az version` answers JSON; the tsv query is what makes the row read "2.91.0" and not "{".
+    versionArgs: ['az', 'version', '--output', 'tsv', '--query', '"azure-cli"'],
     recipe: 'az-venv',
     auth: AZ_AUTH,
   },
