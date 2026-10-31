@@ -275,7 +275,10 @@ app.post('/api/bots/:id/chat', async (c: any) => {
   }
 
   const result = botManager.enqueue(id, {
-    trigger: 'api',
+    // The trigger says where the turn came from (`chat`: the owner, talking), `mode` says how it
+    // is judged (`chat`: an answer, where `work` wants a delivery and counts "Nothing to do" as a
+    // run with no outcome).
+    trigger: 'chat',
     prompt: message,
     fromBot: body?.from,
     mode: 'chat',
@@ -353,6 +356,23 @@ app.post('/api/bots/:id/message', async (c: any) => {
       ? { attachments: upload.attachments.map(a => ({ name: a.name, kind: a.kind })) }
       : {}),
   }, 202);
+});
+
+// A message in the owner's conversation with a bot — the *talk* register, not the task one.
+// The two differ by what the turn is judged on: `api` expects work and treats "Nothing to do"
+// as a failed run, `chat` expects an answer and asks for nothing else. The app has always had
+// both registers (`POST /api/bots/:id/message` and `/chat`); this route is the half the daemon
+// was missing, so writing to a bot from its conversation used to end in a 404.
+app.post('/api/bots/:id/chat', async (c: any) => {
+  if (!botManager) return c.json({ error: 'Bots not available' }, 400);
+  const id = c.req.param('id');
+  const body = await c.req.json().catch(() => null) as { message?: string; from?: string } | null;
+  if (!body?.message) return c.json({ error: 'message is required' }, 400);
+  const result = botManager.enqueue(id, { trigger: 'chat', prompt: body.message, fromBot: body.from });
+  if (!result.accepted) {
+    return c.json({ accepted: false, reasonCode: result.reasonCode }, 409);
+  }
+  return c.json({ accepted: true, jobId: result.jobId, status: 'accepted' }, 202);
 });
 
 // Inbox (pending bot-to-bot mail)
