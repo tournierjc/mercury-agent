@@ -1,7 +1,9 @@
 import { createOpenAI } from '@ai-sdk/openai';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { generateText, streamText } from 'ai';
+import type { LanguageModel } from 'ai';
 import { BaseProvider } from './base.js';
-import type { ProviderConfig } from '../utils/config.js';
+import type { ProviderConfig, ProviderTransport } from '../utils/config.js';
 import type { LLMResponse, LLMStreamChunk } from './base.js';
 import { logger } from '../utils/logger.js';
 import { aimlapiHeaders } from './aimlapi-attribution.js';
@@ -29,16 +31,65 @@ function withReasoningPref(providerName: string): typeof fetch {
   };
 }
 
+/**
+ * The client an endpoint is reached through.
+ *
+ * `openai` is the default and stays the default: it is what every provider here
+ * already uses, and the two clients differ in more than thinking — tool calls and
+ * multi-part messages are placed slightly differently.
+ *
+ * `compatible` exists because of a measured loss. OpenAI's own client reads the
+ * `reasoning` field of OpenAI's API; a compatible server answers with
+ * `reasoning_content`, which the client counts as reasoning tokens and drops. On
+ * our local Qwen and on OpenRouter the stream carried zero reasoning parts while
+ * the API reported 16 to 85 reasoning tokens. The agent (`core/agent.ts`) and the
+ * bot turn (`bots/bot-turn.ts`) both record thinking from those parts, so with
+ * `openai` the thinking was fetched, paid for, and thrown away.
+ */
+export function providerTransport(config: ProviderConfig): ProviderTransport {
+  const transport = config.transport ?? 'openai';
+  if (transport !== 'openai' && transport !== 'compatible') {
+    throw new Error(
+      `[${config.name}] transport "${String(config.transport)}" is not one of "openai", "compatible"`,
+    );
+  }
+  return transport;
+}
+
 export class OpenAICompatProvider extends BaseProvider {
   readonly name: string;
   readonly model: string;
+  /** Which client this instance speaks through — read by the doctor and by tests. */
+  readonly transport: ProviderTransport;
   private client: ReturnType<typeof createOpenAI>;
-  private modelInstance: ReturnType<ReturnType<typeof createOpenAI>['languageModel']>;
+  private modelInstance: LanguageModel;
 
   constructor(config: ProviderConfig, { useChatApi }: { useChatApi?: boolean } = {}) {
     super(config);
     this.name = config.name;
     this.model = config.model;
+    this.transport = providerTransport(config);
+
+    const headers = aimlapiHeaders(config.baseUrl);
+    // Only providers with a reasoning control get the hook; the rest keep
+    // the SDK's default fetch untouched.
+    const fetchImpl = providerHasReasoningControl(config.name) ? withReasoningPref(config.name) : undefined;
+
+    if (this.transport === 'compatible') {
+      // The compatible client speaks Chat Completions only, so `useChatApi` has
+      // nothing to choose here — that surface is what it is.
+      const compatible = createOpenAICompatible({
+        name: config.name,
+        apiKey: config.apiKey || 'no-key',
+        baseURL: config.baseUrl,
+        headers,
+        fetch: fetchImpl,
+      });
+      this.client = createOpenAI({ apiKey: config.apiKey || 'no-key', baseURL: config.baseUrl, headers, fetch: fetchImpl });
+      this.modelInstance = compatible.chatModel(config.model);
+      logger.debug({ provider: config.name, model: config.model }, 'openai-compatible transport');
+      return;
+    }
 
     this.client = createOpenAI({
       apiKey: config.apiKey || 'no-key',
