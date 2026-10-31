@@ -197,6 +197,59 @@ describe('runBotTurn live thinking events', () => {
     expect(last.textTail).toBe('partial reply more');
   });
 
+  it('keeps each step\'s thinking in the turn output, not just a rolling tail', async () => {
+    // The live feed only ever carried the last few hundred characters. What the bot weighed is
+    // what explains a run after the fact, so it is kept per step.
+    mockedStreamText.mockImplementationOnce((opts: any) =>
+      streamedResult({
+        text: 'final reply',
+        finishReason: 'stop',
+        fullStream: [
+          { type: 'start-step', request: {}, warnings: [] },
+          { type: 'reasoning-delta', id: 'r', text: 'First: the price table is stale.' },
+          { type: 'start-step', request: {}, warnings: [] },
+          { type: 'reasoning-delta', id: 'r', text: 'Second: write the correction, then verify.' },
+          { type: 'text-delta', id: 't', text: 'final reply' },
+        ],
+      }),
+    );
+    const output = await runBotTurn(inputWithActivity());
+
+    expect(output.status).toBe('completed');
+    expect(output.reasoning ?? []).toHaveLength(2);
+    expect((output.reasoning ?? []).map((b: any) => b.text)).toEqual([
+      'First: the price table is stale.',
+      'Second: write the correction, then verify.',
+    ]);
+    expect(output.reasoningTruncated).toBe(false);
+  });
+
+  it('bounds the thinking it keeps, newest first, and says so', async () => {
+    // A long run must not turn its transcript into a novel, and a silently shortened record would
+    // read as if the bot had thought nothing before the drop.
+    const long = 'x'.repeat(5_000);
+    mockedStreamText.mockImplementationOnce((opts: any) =>
+      streamedResult({
+        text: 'done',
+        finishReason: 'stop',
+        fullStream: [
+          ...Array.from({ length: 8 }, () => [
+            { type: 'start-step', request: {}, warnings: [] },
+            { type: 'reasoning-delta', id: 'r', text: long },
+          ]).flat(),
+          { type: 'text-delta', id: 't', text: 'done' },
+        ],
+      }),
+    );
+    const output = await runBotTurn(inputWithActivity());
+
+    expect(output.reasoningTruncated).toBe(true);
+    const kept = (output.reasoning ?? []).reduce((n: number, b: any) => n + b.text.length, 0);
+    expect(kept).toBeLessThanOrEqual(24_000);
+    // What survives is the newest thinking, and one block always survives.
+    expect((output.reasoning ?? []).length).toBeGreaterThanOrEqual(1);
+  });
+
   it('inserts a paragraph break at step boundaries so step narrations do not run together', async () => {
     mockedStreamText.mockImplementationOnce((opts: any) =>
       streamedResult({
