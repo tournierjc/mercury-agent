@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -36,16 +36,6 @@ describe('the tool catalogue', () => {
     for (const wanted of ['gh', 'az', 'git', 'jq', 'rg', 'ssh']) expect(ids).toContain(wanted);
   });
 
-  it('says why an apt tool cannot be installed here instead of hiding it', async () => {
-    const { runner } = fakeRun({});
-    const tools = new SandboxTools({ dir: projectDir(), runner });
-    const ffmpeg = (await tools.list()).find((t) => t.id === 'ffmpeg')!;
-
-    expect(ffmpeg.present).toBe(false);
-    expect(ffmpeg.installable).toBe(false);
-    expect(ffmpeg.installBlocked).toMatch(/uid 1000/);
-  });
-
   it('reports a shipped tool as present, with its version', async () => {
     const { runner } = fakeRun({
       'command -v git': { code: 0, stdout: '/usr/bin/git\n', stderr: '' },
@@ -58,6 +48,85 @@ describe('the tool catalogue', () => {
     expect(git.path).toBe('/usr/bin/git');
     expect(git.version).toBe('git version 2.39.5');
     expect(git.installable).toBe(false);
+  });
+});
+
+describe('uninstalling', () => {
+  /** A tools dir with the files a recipe leaves, so the removal has something real to delete. */
+  function installedDir(files: string[], dirs: string[] = []): string {
+    const dir = projectDir();
+    mkdirSync(join(dir, 'bin'), { recursive: true });
+    for (const f of files) writeFileSync(join(dir, 'bin', f), '#!/bin/sh\n', { mode: 0o755 });
+    for (const d of dirs) {
+      mkdirSync(join(dir, d), { recursive: true });
+      writeFileSync(join(dir, d, 'leftover'), 'x');
+    }
+    return dir;
+  }
+
+  it('removes the binary and the private tree of a tool we installed', () => {
+    const dir = installedDir(['ffmpeg']);
+    const { runner } = fakeRun({});
+    const tools = new SandboxTools({ dir, runner });
+
+    const result = tools.remove('ffmpeg');
+
+    expect(result.ok).toBe(true);
+    expect(existsSync(join(dir, 'bin', 'ffmpeg'))).toBe(false);
+    expect(tools.installStatus('ffmpeg')?.state).toBe('removed');
+  });
+
+  it('takes the whole ssh bundle and its extracted tree with it', () => {
+    const dir = installedDir(['ssh', 'scp', 'sftp', 'ssh-keygen', 'ssh-keyscan', 'ssh-add', 'ssh-agent'], ['ssh-extract']);
+    const tools = new SandboxTools({ dir, runner: fakeRun({}).runner });
+
+    tools.remove('ssh');
+
+    expect(existsSync(join(dir, 'bin', 'ssh'))).toBe(false);
+    expect(existsSync(join(dir, 'bin', 'ssh-keyscan'))).toBe(false);
+    expect(existsSync(join(dir, 'ssh-extract'))).toBe(false);
+  });
+
+  it('leaves the other installed tools alone', () => {
+    const dir = installedDir(['gh', 'ffmpeg'], ['gh-extract']);
+    const tools = new SandboxTools({ dir, runner: fakeRun({}).runner });
+
+    tools.remove('gh');
+
+    expect(existsSync(join(dir, 'bin', 'gh'))).toBe(false);
+    expect(existsSync(join(dir, 'bin', 'ffmpeg'))).toBe(true);
+  });
+
+  it('refuses a tool the image ships, because it is not ours to delete', () => {
+    const dir = installedDir([]);
+    const tools = new SandboxTools({ dir, runner: fakeRun({}).runner });
+
+    expect(() => tools.remove('git')).toThrow(/shipped with the image/);
+    expect(() => tools.remove('python3')).toThrow(/shipped with the image/);
+  });
+
+  it('refuses an unknown id and a tool that is not installed', () => {
+    const dir = installedDir([]);
+    const tools = new SandboxTools({ dir, runner: fakeRun({}).runner });
+
+    expect(() => tools.remove('nope')).toThrow(/unknown tool/);
+    expect(() => tools.remove('ffmpeg')).toThrow(/not installed/);
+  });
+
+  it('marks ours as removable and an image tool as not removable', async () => {
+    const { runner } = fakeRun({
+      'command -v git': { code: 0, stdout: '/usr/bin/git\n', stderr: '' },
+      'git --version': { code: 0, stdout: 'git version 2.39.5\n', stderr: '' },
+      'command -v gh': { code: 0, stdout: '/home/node/.mercury/tools/bin/gh\n', stderr: '' },
+      'gh --version': { code: 0, stdout: 'gh version 2.62.0\n', stderr: '' },
+    });
+    const tools = new SandboxTools({ dir: projectDir(), runner });
+    const rows = await tools.list();
+    const git = rows.find((t) => t.id === 'git')!;
+    const gh = rows.find((t) => t.id === 'gh')!;
+
+    expect(gh.removable).toBe(true);
+    expect(git.removable).toBe(false);
   });
 });
 
@@ -102,16 +171,65 @@ describe('the sign-in state', () => {
 });
 
 describe('installing', () => {
-  it('refuses an apt tool with the reason, not a silent no-op', () => {
+  it('installs ffmpeg without root, instead of refusing it for wanting apt', async () => {
     const { runner } = fakeRun({});
     const tools = new SandboxTools({ dir: projectDir(), runner });
-    expect(() => tools.install('ffmpeg')).toThrow(/uid 1000/);
+    const ffmpeg = (await tools.list()).find((t) => t.id === 'ffmpeg')!;
+
+    // The owner's report: the row said "requires root (apt)" and offered no button. A static build
+    // needs neither — the recipe is a download, and the screen must offer it.
+    expect(ffmpeg.present).toBe(false);
+    expect(ffmpeg.installable).toBe(true);
+    expect(ffmpeg.installBlocked).toBe('');
+  });
+
+  it('keeps a per-tool "cannot install here" reason when the catalogue declares one', async () => {
+    const { runner } = fakeRun({});
+    const tools = new SandboxTools({ dir: projectDir(), runner });
+    // The mechanism outlives this catalogue: a tool with no rootless path says why, and the screen
+    // draws that sentence instead of a button that would fail.
+    TOOL_CATALOG.push({
+      id: 'needs-root',
+      label: 'needs-root',
+      description: 'test fixture',
+      bin: 'needs-root',
+      versionArgs: ['needs-root', '--version'],
+      recipe: 'gh-tarball',
+      installBlocked: 'Ce conteneur tourne en uid 1000 sans sudo : apt est impossible ici.',
+    });
+    try {
+      const row = (await tools.list()).find((t) => t.id === 'needs-root')!;
+      expect(row.installable).toBe(false);
+      expect(row.installBlocked).toMatch(/uid 1000/);
+      expect(() => tools.install('needs-root')).toThrow(/uid 1000/);
+    } finally {
+      TOOL_CATALOG.pop();
+    }
   });
 
   it('refuses a tool that ships with the image', () => {
     const { runner } = fakeRun({});
     const tools = new SandboxTools({ dir: projectDir(), runner });
     expect(() => tools.install('git')).toThrow(/shipped with the image/);
+  });
+
+  it('downloads the static ffmpeg binary into the tools bin', async () => {
+    const dir = projectDir();
+    const { runner, calls } = fakeRun({ 'curl -sSL': { code: 0, stdout: 'downloading\n', stderr: '' } });
+    const tools = new SandboxTools({ dir, runner });
+
+    tools.install('ffmpeg');
+    for (let i = 0; i < 100 && tools.installStatus('ffmpeg')?.state === 'running'; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const record = tools.installStatus('ffmpeg')!;
+    const script = calls.map((c) => c.join(' ')).join('\n');
+
+    expect(record.state).toBe('done');
+    // No apt, no root: one gzipped binary, unpacked with python3 (the image has no xz).
+    expect(script).toContain('ffmpeg-linux-arm64.gz');
+    expect(script).not.toContain('apt-get');
+    expect(script).toContain('gzip.open');
   });
 
   it('runs the recipe, keeps a log, and records the outcome on disk', async () => {

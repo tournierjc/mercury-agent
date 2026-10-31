@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -17,7 +17,7 @@ import { join } from 'node:path';
 
 export type ToolAuthState = 'no' | 'unknown' | 'connected';
 
-export type ToolRecipe = 'gh-tarball' | 'az-venv' | 'apt' | 'ssh-deb-bundle';
+export type ToolRecipe = 'gh-tarball' | 'az-venv' | 'ssh-deb-bundle' | 'ffmpeg-static';
 
 export interface ToolAuth {
   /** Command that answers "is this tool signed in?" — exit 0 means yes. */
@@ -38,6 +38,14 @@ export interface ToolDef {
   versionArgs: string[];
   recipe?: ToolRecipe;
   auth?: ToolAuth;
+  /**
+   * Why this one cannot be installed here, when it cannot.
+   *
+   * A *data* field, not a rule about recipes: the screen has to say why a row it offers no button
+   * for is un-actionable, and a hard-coded rule is how a tool that becomes installable keeps
+   * showing an excuse nobody re-read.
+   */
+  installBlocked?: string;
 }
 
 const GH_AUTH: ToolAuth = {
@@ -89,10 +97,12 @@ export const TOOL_CATALOG: ToolDef[] = [
   {
     id: 'ffmpeg',
     label: 'ffmpeg',
-    description: 'Requiert root (apt) — indisponible dans ce conteneur.',
+    // The rootless path is the point: apt needs root, a static build does not. The sentence says
+    // what it is for, and that no one has to rebuild the image or find a shell to get it.
+    description: 'Convertir, découper, extraire — audio et vidéo, sans root.',
     bin: 'ffmpeg',
     versionArgs: ['ffmpeg', '-version'],
-    recipe: 'apt',
+    recipe: 'ffmpeg-static',
   },
   {
     id: 'ssh',
@@ -119,13 +129,21 @@ export interface ToolStatus {
   installable: boolean;
   /** Why it cannot be installed here, when it cannot. */
   installBlocked: string;
+  /**
+   * True when the binary we see is one *we* put in `~/.mercury/tools`.
+   *
+   * The screen offers an uninstall on this flag and nowhere else: `git`, `node` or `python3` come
+   * from the image, and deleting a shipped binary is not a feature — it is a broken container the
+   * next restart silently repairs.
+   */
+  removable: boolean;
 }
 
 export interface InstallRecord {
   id: string;
   startedAt: number;
   finishedAt?: number;
-  state: 'running' | 'done' | 'failed';
+  state: 'running' | 'done' | 'failed' | 'removed';
   log: string;
 }
 
@@ -241,7 +259,7 @@ export class SandboxTools {
         authDetail = text.split('\n').filter((l) => l.trim()).slice(0, 2).join(' ').slice(0, 200);
       }
     }
-    const blocked = def.recipe === 'apt' ? 'Ce conteneur tourne en uid 1000 sans sudo : apt est impossible ici.' : '';
+    const blocked = def.installBlocked ?? '';
     return {
       id: def.id,
       label: def.label,
@@ -251,8 +269,10 @@ export class SandboxTools {
       version,
       auth,
       authDetail,
-      installable: Boolean(def.recipe) && def.recipe !== 'apt' && !present,
-      installBlocked: def.recipe && !present ? blocked : '',
+      installable: Boolean(def.recipe) && !def.installBlocked && !present,
+      installBlocked: !present ? blocked : '',
+      // Ours only: a recipe is exactly "something we know how to put here and take away again".
+      removable: present && Boolean(def.recipe),
     };
   }
 
@@ -261,8 +281,9 @@ export class SandboxTools {
     const def = TOOL_CATALOG.find((t) => t.id === id);
     if (!def) throw new Error(`unknown tool: ${id}`);
     if (!def.recipe) throw new Error(`${id} is shipped with the image — nothing to install`);
-    if (def.recipe === 'apt') throw new Error(`${id} needs root (apt) and this container runs as uid 1000`);
+    if (def.installBlocked) throw new Error(`${id}: ${def.installBlocked}`);
     if (def.recipe === 'ssh-deb-bundle') return this.installSshBundle();
+    if (def.recipe === 'ffmpeg-static') return this.installFfmpegStatic();
     const existing = this.installs.get(id);
     if (existing?.state === 'running') return existing;
 
@@ -388,6 +409,127 @@ export class SandboxTools {
       record.finishedAt = Date.now();
       this.persistRecord(record);
     }
+  }
+
+  /**
+   * ffmpeg is the tool apt owned that a *single file* answers: the `ffmpeg-static` releases publish
+   * one gzipped arm64 binary, and the image has no `xz` (measured) but it does have python3's lzma
+   * and gzip — so the download is a `.gz`, unpacked with the one decompressor we are sure of.
+   *
+   * No apt, no root, no rebuild: the binary lands in the tools bin, on the PATH the argv lane
+   * already trusts, and survives a container upgrade like every other install here.
+   */
+  private installFfmpegStatic(): InstallRecord {
+    const existing = this.installs.get('ffmpeg');
+    if (existing?.state === 'running') return existing;
+    const record: InstallRecord = { id: 'ffmpeg', startedAt: Date.now(), state: 'running', log: '' };
+    this.installs.set('ffmpeg', record);
+    void this.runFfmpegStatic(record).catch((err) => {
+      record.state = 'failed';
+      record.finishedAt = Date.now();
+      record.log = (record.log + `\n${String((err as Error)?.message ?? err)}`).slice(-4_000);
+      this.persistRecord(record);
+    });
+    return record;
+  }
+
+  private async runFfmpegStatic(record: InstallRecord): Promise<void> {
+    const onOutput = (chunk: string): void => {
+      record.log = (record.log + chunk).slice(-4_000);
+    };
+    const bin = toolsPath();
+    mkdirSync(bin, { recursive: true });
+    // The release names its assets per architecture; the container is arm64, and the x64 name is
+    // there so a laptop install does not need a second recipe.
+    const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+    const url = `https://github.com/eugeneware/ffmpeg-static/releases/download/b6.0/ffmpeg-linux-${arch}.gz`;
+    const gz = join(this.dir, 'ffmpeg.gz');
+    const target = join(bin, 'ffmpeg');
+    const script =
+      `set -e; curl -sSL --max-time 600 -o ${gz} '${url}'; ` +
+      `python3 -c "import gzip,shutil; i=gzip.open('${gz}','rb'); o=open('${target}','wb'); shutil.copyfileobj(i,o); i.close(); o.close()"; ` +
+      `chmod 755 ${target}; rm -f ${gz}; ` +
+      `test -x ${target} && ${target} -version | head -1`;
+    try {
+      await this.execOrThrow(script, { timeoutMs: 700_000, onOutput }, 'ffmpeg');
+      record.state = 'done';
+    } catch (err) {
+      record.state = 'failed';
+      record.log = (record.log + `\n${String((err as Error)?.message ?? err)}`).slice(-4_000);
+    } finally {
+      record.finishedAt = Date.now();
+      this.persistRecord(record);
+    }
+  }
+
+  /**
+   * What a recipe put on disk — and the whole of what an uninstall may remove.
+   *
+   * Listed per tool rather than derived, because the two halves do not share a directory: the
+   * binaries sit in `tools/bin` (the one dir on PATH) and the private trees (`az` venv, unpacked
+   * archives) in `tools/`. Removing "everything under tools/" would take the *other* installed
+   * tools with it.
+   */
+  private artifactsOf(id: string): { files: string[]; dirs: string[] } {
+    switch (id) {
+      case 'gh':
+        return { files: ['gh'], dirs: ['gh-extract'] };
+      case 'az':
+        return { files: ['az'], dirs: ['az'] };
+      case 'ssh':
+        return { files: ['ssh', 'scp', 'sftp', 'ssh-keygen', 'ssh-keyscan', 'ssh-add', 'ssh-agent'], dirs: ['ssh-extract'] };
+      case 'ffmpeg':
+        return { files: ['ffmpeg'], dirs: [] };
+      default:
+        return { files: [], dirs: [] };
+    }
+  }
+
+  /**
+   * Removes a tool we installed, and only that.
+   *
+   * Refuses the tools the image ships: `git` is not installed *here*, and a "delete" that quietly
+   * answers ok for it would be a button that lies — the binary is in `/usr/bin`, root owns it, and
+   * the next container recreate puts it back anyway.
+   */
+  remove(id: string): { ok: true; removed: string[] } {
+    const def = TOOL_CATALOG.find((t) => t.id === id);
+    if (!def) throw new Error(`unknown tool: ${id}`);
+    if (!def.recipe) throw new Error(`${id} is shipped with the image — there is nothing of ours to remove`);
+    const running = this.installs.get(id);
+    if (running?.state === 'running') throw new Error(`${id} is still installing — wait for it to finish`);
+
+    const artifacts = this.artifactsOf(id);
+    const removed: string[] = [];
+    for (const name of artifacts.files) {
+      // Relative to *this* instance's dir, not the module-level one: the daemon and a test both
+      // pass a directory, and an uninstall that deleted from `~/.mercury/tools` while the list it
+      // was drawn from pointed elsewhere would be the worst kind of "worked on my machine".
+      const path = join(this.dir, 'bin', name);
+      if (existsSync(path)) {
+        rmSync(path, { force: true, recursive: true });
+        removed.push(path);
+      }
+    }
+    for (const name of artifacts.dirs) {
+      const path = join(this.dir, name);
+      if (existsSync(path)) {
+        rmSync(path, { force: true, recursive: true });
+        removed.push(path);
+      }
+    }
+    if (removed.length === 0) throw new Error(`${id} is not installed`);
+
+    this.installs.delete(id);
+    const record: InstallRecord = {
+      id,
+      startedAt: Date.now(),
+      finishedAt: Date.now(),
+      state: 'removed',
+      log: `removed ${removed.length} path(s): ${removed.join(', ')}`.slice(0, 1_000),
+    };
+    this.persistRecord(record);
+    return { ok: true, removed };
   }
 
   private async execOrThrow(script: string, opts: { timeoutMs: number; onOutput: (c: string) => void }, label: string): Promise<void> {
