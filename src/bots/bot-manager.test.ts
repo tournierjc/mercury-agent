@@ -1242,7 +1242,11 @@ describe('bot governance (ADR-020)', () => {
     // A completed-but-empty run is shown as such in the bot thread.
     const transcripts = readdirSync(join(store.botDir('writer'), 'transcripts'));
     expect(transcripts.length).toBe(4);
-    expect(readFileSync(join(store.botDir('writer'), 'transcripts', transcripts[0]), 'utf-8')).toContain('"trace"');
+    const transcriptBody = readFileSync(join(store.botDir('writer'), 'transcripts', transcripts[0]), 'utf-8');
+    expect(transcriptBody).toContain('"trace"');
+    // The thinking rides the transcript too: a run is read back to understand what the bot weighed,
+    // not only what it did.
+    expect(transcriptBody).toContain('"reasoning"');
   });
 
   it('a turn-limit stop is journaled as failed/turn_budget but is not an escalation', async () => {

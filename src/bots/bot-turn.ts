@@ -18,6 +18,23 @@ import type { BotManifest, BotTrigger } from './types.js';
 
 
 /** Mailbox messages injected mid-turn (bot-to-bot or queued user input). */
+/**
+ * One step's thinking, as the model emitted it.
+ *
+ * Reasoning used to be consumed and dropped: only a rolling tail of it reached the live feed, so a
+ * run explained after the fact showed what the bot did and never what it weighed. Kept per step and
+ * bounded (a run that thinks for twenty steps must not turn its transcript into a novel).
+ */
+export interface BotReasoningBlock {
+  step: number;
+  text: string;
+}
+
+/** Thinking kept per run, newest first when it does not fit. */
+const MAX_REASONING_CHARS = 24_000;
+/** Thinking kept for one step. */
+const MAX_REASONING_BLOCK_CHARS = 8_000;
+
 export interface BotTurnMail {
   from: string;
   content: string;
@@ -308,9 +325,31 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
     onDelivered: (path) => deliveries.push(path),
   });
 
+  // Thinking, per step, bounded. Closing a block is the only place that trims, so the common case
+  // (a turn within budget) copies nothing.
+  const reasoning: BotReasoningBlock[] = [];
+  let reasoningTruncated = false;
+  let stepReasoning = '';
+  const closeReasoning = (): void => {
+    const text = stepReasoning.trim();
+    stepReasoning = '';
+    if (!text) return;
+    reasoning.push({
+      step: stepIndex,
+      text: text.length > MAX_REASONING_BLOCK_CHARS ? text.slice(0, MAX_REASONING_BLOCK_CHARS) : text,
+    });
+    let total = reasoning.reduce((sum, block) => sum + block.text.length, 0);
+    while (total > MAX_REASONING_CHARS && reasoning.length > 1) {
+      total -= reasoning[0].text.length;
+      reasoning.shift();
+      reasoningTruncated = true;
+    }
+  };
+
   const baseOutput = () => ({
     tokensIn, tokensOut, toolsUsed: [...toolsUsed], startedAt, steps: stepIndex, toolCalls: trace.length,
     peakInputTokens, deliverables: [...deliveries], outcomeNudged, trace: [...trace],
+    reasoning: [...reasoning], reasoningTruncated,
   });
 
   try {
@@ -388,12 +427,17 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
       };
       for await (const part of stream.fullStream) {
         if (part.type === 'reasoning-delta' && part.text) {
+          stepReasoning += part.text;
           reasoningTail = (reasoningTail + part.text).slice(-THINKING_TAIL_CHARS);
         } else if (part.type === 'text-delta' && part.text) {
           textTail = (textTail + part.text).slice(-THINKING_TAIL_CHARS);
-        } else if (part.type === 'start-step' && (reasoningTail || textTail)) {
-          reasoningTail += '\n\n';
-          textTail += '\n\n';
+        } else if (part.type === 'start-step') {
+          // A new step thinks anew; the previous step's thinking is closed and kept.
+          closeReasoning();
+          if (reasoningTail || textTail) {
+            reasoningTail += '\n\n';
+            textTail += '\n\n';
+          }
         } else if (part.type === 'error') {
           // The provider's real error. Without this, `stream.text` below
           // throws the generic "No output generated" and the journal never
@@ -403,6 +447,7 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
         if (Date.now() - lastEmit >= THINKING_EMIT_INTERVAL_MS) flushThinking();
       }
       flushThinking();
+      closeReasoning();
 
       let result: { text: string; finishReason: unknown };
       try {
