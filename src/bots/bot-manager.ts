@@ -876,7 +876,12 @@ export class BotManager {
       };
       const journal = this.journalFor(botId);
       journal.append(record);
-      journal.writeTranscript(record, { prompt: job.prompt, output: output.output, trace: output.trace });
+      journal.writeTranscript(record, {
+        prompt: job.prompt,
+        output: output.output,
+        trace: output.trace,
+        reasoning: output.reasoning,
+      });
       this.lastRun.set(botId, { at: Date.now(), state: record.state });
       this.needsYou.delete(botId);
       this.recordBotTokens(botId, manifest, output.tokensIn + output.tokensOut);

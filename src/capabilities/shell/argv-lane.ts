@@ -16,9 +16,10 @@
  * Everything else (pipelines included) goes to the approval lane, which
  * prompts with the exact string and may still use the shell.
  */
-import { accessSync, constants, realpathSync, statSync } from 'node:fs';
+import { accessSync, constants, existsSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
+import { toolsPath } from '../../sandbox/paths.js';
 
 // ─── Tokenizer ───────────────────────────────────────────────────────────────
 
@@ -308,7 +309,21 @@ export function pinnedSearchDirs(platform: NodeJS.Platform = process.platform, e
   // (/data/data/com.termux/files/usr/bin), owned by the app.
   const prefix = env.PREFIX;
   if (prefix && prefix.includes('com.termux')) dirs.unshift(join(prefix, 'bin'));
-  return dirs;
+  return withInstalledTools(dirs);
+}
+
+/**
+ * Tools the owner installed from the phone, appended last.
+ *
+ * The pinned PATH exists so a project's `.env` or a skill cannot substitute a binary; this directory
+ * is not that — it is the daemon's own install target, written by an explicit user action. Appended,
+ * never prepended, so a downloaded `git` can never shadow the system one, while a `gh` that is
+ * installed and signed in is *findable* instead of invisible: the argv lane used to answer "not
+ * found" for a tool sitting right there, which reads as a broken sandbox.
+ */
+function withInstalledTools(dirs: string[]): string[] {
+  const dir = toolsPath();
+  return existsSync(dir) ? [...dirs, dir] : [...dirs];
 }
 
 /** The pinned PATH string for spawned tools (`:`-joined on POSIX, `;` on Windows). */

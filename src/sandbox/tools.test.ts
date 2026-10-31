@@ -33,7 +33,7 @@ function projectDir(): string {
 describe('the tool catalogue', () => {
   it('offers the shortcuts the owner asked for', () => {
     const ids = TOOL_CATALOG.map((t) => t.id);
-    for (const wanted of ['gh', 'az', 'git', 'jq', 'rg']) expect(ids).toContain(wanted);
+    for (const wanted of ['gh', 'az', 'git', 'jq', 'rg', 'ssh']) expect(ids).toContain(wanted);
   });
 
   it('says why an apt tool cannot be installed here instead of hiding it', async () => {
@@ -160,6 +160,59 @@ describe('installing', () => {
     const second = tools.install('gh');
 
     expect(second.startedAt).toBe(first.startedAt);
+  });
+
+  describe('ssh — the apt tool that installs without root', () => {
+    it('offers ssh as installable, unlike the plain apt recipes', async () => {
+      const { runner } = fakeRun({});
+      const tools = new SandboxTools({ dir: projectDir(), runner });
+      const ssh = (await tools.list()).find((t) => t.id === 'ssh')!;
+
+      expect(ssh.present).toBe(false);
+      expect(ssh.installable).toBe(true);
+      expect(ssh.installBlocked).toBe('');
+    });
+
+    it('unpacks the pinned Debian package into the tools bin instead of refusing like apt', async () => {
+      const dir = projectDir();
+      const { runner, calls } = fakeRun({
+        'dpkg-deb -x': { code: 0, stdout: '', stderr: '' },
+        'ssh -V': { code: 0, stdout: 'OpenSSH_9.2p1 Debian-2+deb12u7, OpenSSL 3.0.17\n', stderr: '' },
+      });
+      const tools = new SandboxTools({ dir, runner });
+
+      tools.install('ssh');
+      for (let i = 0; i < 100 && tools.installStatus('ssh')?.state === 'running'; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      const record = tools.installStatus('ssh')!;
+      const script = calls.map((c) => c.join(' ')).find((c) => c.includes('dpkg-deb')) ?? '';
+
+      expect(record.state).toBe('done');
+      // The download is the pinned Debian 12 client, for this machine's arch — not "latest".
+      expect(script).toMatch(/openssh-client_9\.2p1-2\+deb12u7_(amd64|arm64)\.deb/);
+      expect(script).toMatch(/dpkg-deb -x/);
+      // The binaries a bot needs: the client plus the probes and copy tools an ops prompt asks for.
+      // The copy loop carries them as "$b" — assert the loop, not a per-binary literal.
+      expect(script).toMatch(/for b in ssh scp sftp ssh-keygen ssh-keyscan/);
+      // No root anywhere in the recipe.
+      expect(script).not.toMatch(/\bsudo\b|apt-get install/);
+    });
+
+    it('records a missing dpkg-deb as a failure the phone can read', async () => {
+      const { runner } = fakeRun({
+        'dpkg-deb': { code: 3, stdout: '', stderr: 'dpkg-deb introuvable' },
+      });
+      const tools = new SandboxTools({ dir: projectDir(), runner });
+
+      tools.install('ssh');
+      for (let i = 0; i < 100 && tools.installStatus('ssh')?.state === 'running'; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      expect(tools.installStatus('ssh')!.state).toBe('failed');
+      expect(tools.installStatus('ssh')!.log).toMatch(/dpkg-deb/);
+    });
   });
 });
 
