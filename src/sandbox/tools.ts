@@ -17,7 +17,7 @@ import { join } from 'node:path';
 
 export type ToolAuthState = 'no' | 'unknown' | 'connected';
 
-export type ToolRecipe = 'gh-tarball' | 'az-venv' | 'apt';
+export type ToolRecipe = 'gh-tarball' | 'az-venv' | 'apt' | 'ssh-deb-bundle';
 
 export interface ToolAuth {
   /** Command that answers "is this tool signed in?" — exit 0 means yes. */
@@ -94,6 +94,16 @@ export const TOOL_CATALOG: ToolDef[] = [
     versionArgs: ['ffmpeg', '-version'],
     recipe: 'apt',
   },
+  {
+    id: 'ssh',
+    label: 'OpenSSH client',
+    // The recipe name carries the how: dpkg-deb -x of a pinned Debian 12 bundle, no root. The
+    // sentence stays non-technical: what it is for, and that the keys are the owner's, not the tool's.
+    description: 'Se connecter aux autres machines (ssh, scp, ssh-keyscan).',
+    bin: 'ssh',
+    versionArgs: ['ssh', '-V'],
+    recipe: 'ssh-deb-bundle',
+  },
 ];
 
 export interface ToolStatus {
@@ -162,7 +172,12 @@ export const defaultRunner: Runner = (cmd, { timeoutMs, onOutput }) =>
   });
 
 /** Where installs land — inside the mounted home, so they survive a container upgrade. */
-export { toolsDir, toolsPath } from './paths.js';
+// Imported (not just re-exported): runRecipe and the ssh recipe call toolsPath() directly, and a
+// bare re-export leaves the name undefined at runtime — the daemon restart-looped while every
+// test that never reached an install stayed green.
+import { toolsDir, toolsPath } from './paths.js';
+
+export { toolsDir, toolsPath };
 
 export class SandboxTools {
   private readonly dir: string;
@@ -247,6 +262,7 @@ export class SandboxTools {
     if (!def) throw new Error(`unknown tool: ${id}`);
     if (!def.recipe) throw new Error(`${id} is shipped with the image — nothing to install`);
     if (def.recipe === 'apt') throw new Error(`${id} needs root (apt) and this container runs as uid 1000`);
+    if (def.recipe === 'ssh-deb-bundle') return this.installSshBundle();
     const existing = this.installs.get(id);
     if (existing?.state === 'running') return existing;
 
@@ -308,6 +324,62 @@ export class SandboxTools {
       } else {
         throw new Error('no recipe');
       }
+      record.state = 'done';
+    } catch (err) {
+      record.state = 'failed';
+      record.log = (record.log + `\n${String((err as Error)?.message ?? err)}`).slice(-4_000);
+    } finally {
+      record.finishedAt = Date.now();
+      this.persistRecord(record);
+    }
+  }
+
+  /**
+   * ssh is the one tool apt owns on Debian — but the package needs no *dpkg*, only an unpacker.
+   *
+   * `dpkg-deb -x` extracts a .deb with no root and no database, and the client runs against the
+   * host's shared libraries (measured in the container: every dependency is already there). The
+   * binaries land in the daemon's own tools bin, which is what the argv lane already trusts.
+   *
+   * One pinned version, not "latest": the URL is the product here — apt cannot reach this container,
+   * so the recipe is what reaches the archive.
+   */
+  private installSshBundle(): InstallRecord {
+    const existing = this.installs.get('ssh');
+    if (existing?.state === 'running') return existing;
+    const record: InstallRecord = { id: 'ssh', startedAt: Date.now(), state: 'running', log: '' };
+    this.installs.set('ssh', record);
+    void this.runSshBundle(record).catch((err) => {
+      record.state = 'failed';
+      record.finishedAt = Date.now();
+      record.log += `\n${String((err as Error)?.message ?? err)}`;
+      this.persistRecord(record);
+    });
+    return record;
+  }
+
+  private async runSshBundle(record: InstallRecord): Promise<void> {
+    const onOutput = (chunk: string): void => {
+      record.log = (record.log + chunk).slice(-4_000);
+    };
+    const bin = toolsPath();
+    mkdirSync(bin, { recursive: true });
+    const version = '1:9.2p1-2+deb12u7';
+    const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
+    const deb = `openssh-client_9.2p1-2+deb12u7_${arch}.deb`;
+    const url = `http://deb.debian.org/debian/pool/main/o/openssh/${encodeURIComponent(deb)}`;
+    const pkg = join(this.dir, deb);
+    const root = join(this.dir, 'ssh-extract');
+    const script =
+      `set -e; command -v dpkg-deb >/dev/null || { echo 'dpkg-deb introuvable' >&2; exit 3; }; ` +
+      `curl -sSL --max-time 120 -o ${pkg} '${url}'; ` +
+      `rm -rf ${root}; mkdir -p ${root}; dpkg-deb -x ${pkg} ${root}; ` +
+      `for b in ssh scp sftp ssh-keygen ssh-keyscan ssh-add ssh-agent; do ` +
+      `cp ${join(root, 'usr', 'bin', '$b')} ${join(bin, '$b')}; done; ` +
+      `rm -rf ${pkg} ${root}; ` +
+      `test -x ${join(bin, 'ssh')} && ${join(bin, 'ssh')} -V`;
+    try {
+      await this.execOrThrow(script, { timeoutMs: 300_000, onOutput }, `ssh (${version})`);
       record.state = 'done';
     } catch (err) {
       record.state = 'failed';
