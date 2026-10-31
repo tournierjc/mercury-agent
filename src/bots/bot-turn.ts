@@ -188,9 +188,15 @@ export interface BotTurnOutput {
   /** The no-outcome nudge was issued (once per turn). */
   outcomeNudged: boolean;
   trace: BotToolTraceEntry[];
-  /** What the turn thought, per step — newest blocks kept when the run exceeds the cap. */
+  /**
+   * The thinking the turn recorded, step by step.
+   *
+   * Filled from the provider stream's `reasoning-delta` parts — so an endpoint
+   * reached through a client that drops them records an empty list. `transport:
+   * compatible` is what makes them arrive for a compatible server.
+   */
   reasoning: BotReasoningBlock[];
-  /** True when older steps' thinking was dropped to stay under the cap. */
+  /** True when the oldest blocks were dropped to stay inside the transcript's cap. */
   reasoningTruncated: boolean;
 }
 
