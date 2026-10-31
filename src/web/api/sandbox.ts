@@ -46,6 +46,23 @@ app.get('/api/sandbox/tools/installs', (c: Context) => {
   return c.json({ installs: tools.history() });
 });
 
+/**
+ * Removes a tool we installed.
+ *
+ * Synchronous, unlike an install: deleting a binary and its private tree is one filesystem call,
+ * and answering with a job the phone would then have to poll would be a ceremony around `rm`. The
+ * route refuses the tools the image ships (the service says why) — a 400 carries that sentence.
+ */
+app.delete('/api/sandbox/tools/:id', (c: Context) => {
+  if (!tools) return down(c);
+  const id = String(c.req.param('id') ?? '');
+  try {
+    return c.json(tools.remove(id));
+  } catch (err) {
+    return c.json({ error: String((err as Error)?.message ?? err) }, 400);
+  }
+});
+
 /** Starts the device flow and returns the one-time code the owner has to type. */
 app.post('/api/sandbox/tools/:id/connect', async (c: Context) => {
   if (!tools) return down(c);
