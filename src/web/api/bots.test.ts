@@ -368,9 +368,6 @@ describe('web bots API — files on a bot message', () => {
     if (savedHome === undefined) delete process.env.MERCURY_HOME;
     else process.env.MERCURY_HOME = savedHome;
   });
-  beforeEach(() => {
-    store.create({ id: 'painter', name: 'Painter' });
-  });
   const send = (body: unknown) =>
     app.request('/api/bots/painter/message', {
       method: 'POST',

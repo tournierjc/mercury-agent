@@ -66,7 +66,6 @@ describe('a declared capability beats the name-based guess', () => {
 
     const out = withAttachments(history, msg([{ kind: 'image', path: img }]), 'openaiCompat', 'qwen3.8-flash-next', true);
     const parts = out[2].content as unknown as Array<{ type: string }>;
-    const parts = out[2].content as Array<{ type: string }>;
     expect(parts.some(p => p.type === 'image')).toBe(true);
   });
 
@@ -76,7 +75,6 @@ describe('a declared capability beats the name-based guess', () => {
 
     const out = withAttachments(history, msg([{ kind: 'image', path: img }]), 'openai', 'gpt-4.1-mini', false);
     const parts = out[2].content as unknown as Array<{ type: string; text?: string }>;
-    const parts = out[2].content as Array<{ type: string; text?: string }>;
     expect(parts.some(p => p.type === 'image')).toBe(false);
     expect(JSON.stringify(parts)).toContain("can't view images");
   });

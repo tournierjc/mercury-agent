@@ -15,6 +15,7 @@ import { MAX_AUTOMATIC_CONTINUATIONS } from '../core/execution-limits.js';
 import { formatToolStep } from '../utils/tool-label.js';
 import { logger } from '../utils/logger.js';
 import type { BotManifest, BotTrigger } from './types.js';
+import { getDefaultConfig } from '../utils/config.js';
 
 
 /** Mailbox messages injected mid-turn (bot-to-bot or queued user input). */
@@ -187,6 +188,10 @@ export interface BotTurnOutput {
   /** The no-outcome nudge was issued (once per turn). */
   outcomeNudged: boolean;
   trace: BotToolTraceEntry[];
+  /** What the turn thought, per step — newest blocks kept when the run exceeds the cap. */
+  reasoning: BotReasoningBlock[];
+  /** True when older steps' thinking was dropped to stay under the cap. */
+  reasoningTruncated: boolean;
 }
 
 const MAX_STEPS_DEFAULT = 25;
@@ -270,7 +275,13 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
       timestamp: Date.now(),
       metadata: { attachments: files },
     } as never;
-    const withFiles = withAttachments(messages, turnMessage, provider.name, provider.getModel(), provider.seesImages);
+    // A REAL provider exposes `seesImages` from its own config; a port built by hand may not.
+    // Whoever is left without a declaration asks the config for this endpoint's, which is where the
+    // owner's `*_VISION` lands — otherwise a declared self-hosted vision model is told it cannot see.
+    const declaredVision = (provider as { seesImages?: boolean }).seesImages
+      ?? input.visionDeclared
+      ?? (getDefaultConfig().providers as unknown as Record<string, { vision?: boolean } | undefined>)[provider.name]?.vision;
+    const withFiles = withAttachments(messages, turnMessage, provider.name, provider.getModel(), declaredVision);
     messages.splice(0, messages.length, ...withFiles);
   }
 
