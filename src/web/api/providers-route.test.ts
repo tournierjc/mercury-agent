@@ -69,6 +69,18 @@ describe('providers settings', () => {
     expect(body.setupRequired).toBe(false);
   });
 
+  it('lists OpenRouter — a gateway the app draws with its own routing fields', async () => {
+    const res = await call('GET', '/api/providers/settings');
+    const body = await res.json() as ProviderSettingsBody;
+    const or = body.providers.find((p: { id: string }) => p.id === 'openrouter');
+
+    // The phone's Providers screen has OpenRouter-only controls (`order`, `quantizations`): if the
+    // daemon does not list the provider, that screen has nowhere to put them and the owner cannot
+    // reach the endpoint at all.
+    expect(or).toMatchObject({ label: 'OpenRouter', kind: 'gateway', needsKey: true });
+    expect(or?.configured).toBe(false);
+  });
+
   it('checks an unsaved key: shape first, with no network call', async () => {
     const res = await call('POST', '/api/providers/anthropic/check', { apiKey: 'sk-wrong-shape-1234567890' });
     const body = await res.json() as CheckBody;
