@@ -88,6 +88,9 @@ const MIMO_PREFERRED_MODELS = [
 const MIMO_TOKEN_PLAN_PREFERRED_MODELS = MIMO_PREFERRED_MODELS;
 
 const OPENAI_COMPAT_PREFERRED_MODELS = [] as const;
+// Même raison qu'openaiCompat : nous ne gardons pas une liste de modèles OpenRouter, elle
+// change toutes les semaines ; le sélecteur apprend le catalogue depuis /models.
+const OPENROUTER_PREFERRED_MODELS = [] as const;
 const LM_STUDIO_PREFERRED_MODELS = [] as const;
 const ATOMIC_CHAT_PREFERRED_MODELS = [] as const;
 
@@ -132,6 +135,7 @@ export function getPreferredModelsForProvider(provider: ProviderName): string[] 
     aimlapi: AIMLAPI_PREFERRED_MODELS,
     deepseek: DEEPSEEK_PREFERRED_MODELS,
     openai: OPENAI_PREFERRED_MODELS,
+    openrouter: OPENROUTER_PREFERRED_MODELS,
     anthropic: ANTHROPIC_PREFERRED_MODELS,
     grok: GROK_PREFERRED_MODELS,
     atlascloud: ATLASCLOUD_PREFERRED_MODELS,
@@ -257,6 +261,7 @@ function chooseRecommendedModel(
     aimlapi: AIMLAPI_PREFERRED_MODELS,
     deepseek: DEEPSEEK_PREFERRED_MODELS,
     openai: OPENAI_PREFERRED_MODELS,
+    openrouter: OPENROUTER_PREFERRED_MODELS,
     anthropic: ANTHROPIC_PREFERRED_MODELS,
     grok: GROK_PREFERRED_MODELS,
     atlascloud: ATLASCLOUD_PREFERRED_MODELS,
@@ -301,6 +306,7 @@ export function buildModelCatalog(
     aimlapi: AIMLAPI_PREFERRED_MODELS,
     deepseek: DEEPSEEK_PREFERRED_MODELS,
     openai: OPENAI_PREFERRED_MODELS,
+    openrouter: OPENROUTER_PREFERRED_MODELS,
     anthropic: ANTHROPIC_PREFERRED_MODELS,
     grok: GROK_PREFERRED_MODELS,
     atlascloud: ATLASCLOUD_PREFERRED_MODELS,

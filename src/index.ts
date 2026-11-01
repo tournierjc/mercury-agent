@@ -186,6 +186,7 @@ const PROVIDER_OPTIONS: Array<{ key: ProviderName; label: string }> = [
   { key: 'mercuryCloud', label: 'Mercury Cloud (hosted — no API keys needed)' },
   { key: 'deepseek', label: 'DeepSeek' },
   { key: 'openai', label: 'OpenAI' },
+  { key: 'openrouter', label: 'OpenRouter (une clé, beaucoup de modèles)' },
   { key: 'anthropic', label: 'Anthropic' },
   { key: 'githubCopilot', label: 'GitHub Copilot' },
   { key: 'grok', label: 'Grok (xAI)' },
