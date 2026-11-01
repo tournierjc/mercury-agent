@@ -511,6 +511,9 @@ describe('turnCaption — files without a caption', () => {
   });
   it('stays empty with neither text nor files', () => {
     expect(turnCaption('', [])).toBe('');
+  });
+});
+
 describe('runBotTurn with a photo', () => {
   // A real file: the helper reads the bytes, so a fake path would only test the fake.
   const png = join(mkdtempSync(join(tmpdir(), 'bot-turn-png-')), 'dot.png');
@@ -543,19 +546,5 @@ describe('runBotTurn with a photo', () => {
     expect(carrying).toHaveLength(1);
     expect(String(carrying[0].content[0].text)).toContain("can't view images");
     expect(carrying[0].content.some((part: any) => part.type === 'image')).toBe(false);
-  it('keeps a real prompt untouched', () => {
-    expect(turnCaption('  describe this  ', [img])).toBe('describe this');
-  });
-  it('names the files when there is no text at all', () => {
-    // An empty text block is rejected by providers: the photo says what it is.
-    expect(turnCaption('', [img])).toBe('(Attached: a.png)');
-    expect(turnCaption('   ', [img, { ...img, name: 'b.pdf', kind: 'document' as const }]))
-      .toBe('(Attached: a.png, b.pdf)');
-  });
-  it('falls back to "file" when a name is missing, never to an empty string', () => {
-    expect(turnCaption('', [{ kind: 'image', path: '/tmp/x.webp' }])).toBe('(Attached: file)');
-  });
-  it('stays empty with neither text nor files', () => {
-    expect(turnCaption('', [])).toBe('');
   });
 });

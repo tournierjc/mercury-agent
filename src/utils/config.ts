@@ -446,7 +446,6 @@ export function getDefaultConfig(): MercuryConfig {
         model: getEnv('OPENAI_COMPAT_MODEL', ''),
         enabled: getEnvBool('OPENAI_COMPAT_ENABLED', false),
         vision: getEnvOptionalBool('OPENAI_COMPAT_VISION'),
-        vision: getEnvBool('OPENAI_COMPAT_VISION', false),
       },
       mimo: {
         name: 'mimo',
@@ -466,7 +465,6 @@ export function getDefaultConfig(): MercuryConfig {
         name: 'lmStudio',
         apiKey: getEnv('LM_STUDIO_API_KEY', ''),
         vision: getEnvOptionalBool('LM_STUDIO_VISION'),
-        vision: getEnvBool('LM_STUDIO_VISION', false),
         baseUrl: getEnv('LM_STUDIO_BASE_URL', 'http://127.0.0.1:1234/v1'),
         model: getEnv('LM_STUDIO_MODEL', ''),
         enabled: getEnvBool('LM_STUDIO_ENABLED', false),
@@ -492,7 +490,6 @@ export function getDefaultConfig(): MercuryConfig {
         model: getEnv('LITELLM_MODEL', 'gpt-4o-mini'),
         enabled: getEnvBool('LITELLM_ENABLED', false),
         vision: getEnvOptionalBool('LITELLM_VISION'),
-        vision: getEnvBool('LITELLM_VISION', false),
       },
     },
     channels: {

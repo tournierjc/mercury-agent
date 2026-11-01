@@ -60,8 +60,6 @@ export interface BotJob {
   attachments?: ChannelAttachment[];
   /** 'chat' answers the owner in the app; 'work' (default) delivers. */
   mode?: 'work' | 'chat';
-  /** Photos/PDFs to hand the turn; `web/api/uploads.ts` already wrote them to disk. */
-  attachments?: ChannelAttachment[];
   createdAt: number;
   attempts: number;
   /** Scheduler task id for cron runs (routine gating + no-outcome streaks). */
@@ -407,7 +405,6 @@ export class BotManager {
   }
 
   enqueue(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; attachments?: ChannelAttachment[]; mode?: 'work' | 'chat' }): { jobId: string; accepted: boolean; reasonCode?: string; duplicated?: boolean } {
-  enqueue(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; mode?: 'work' | 'chat'; attachments?: ChannelAttachment[] }): { jobId: string; accepted: boolean; reasonCode?: string } {
     const manifest = this.store.get(botId);
     if (!manifest) return { jobId: '', accepted: false, reasonCode: 'target_unknown' };
     if (!manifest.enabled || this.disabled.has(botId)) return { jobId: '', accepted: false, reasonCode: 'target_disabled' };
@@ -451,7 +448,6 @@ export class BotManager {
       source: job.source,
       attachments: job.attachments,
       mode: job.mode,
-      attachments: job.attachments,
       attempts: job.attempts ?? 0,
       createdAt: Date.now(),
       idempotencyKey: idempotencyKeyFor(botId, job.trigger, job.prompt, job.fromBot, job.attachments),

@@ -104,8 +104,7 @@ const DLQ_CAP = 100;
 /**
  * Two requests that differ only by their files are different jobs: the same caption
  * ("what is this?") with two different photos must not collapse into one. Files are keyed
- * by their bytes, not their path: every upload gets a fresh random name, so a path would
- * never let a retried request dedupe.
+ * by their bytes, not their path — see `fileFingerprint`.
  */
 /** A file's content hash, or its path when it can't be read (the turn will skip it anyway). */
 function fileFingerprint(attachment: ChannelAttachment): string {
@@ -115,8 +114,7 @@ function fileFingerprint(attachment: ChannelAttachment): string {
     return attachment.path;
   }
 }
- * ("what is this?") with two different photos must not collapse into one.
- */
+
 export function idempotencyKeyFor(
   botId: string,
   trigger: BotTrigger,
@@ -125,7 +123,6 @@ export function idempotencyKeyFor(
   attachments?: ChannelAttachment[],
 ): string {
   const files = (attachments ?? []).map(fileFingerprint).join(',');
-  const files = (attachments ?? []).map(a => a.path).join(',');
   return createHash('sha256').update(`${botId}|${trigger}|${prompt}|${fromBot ?? ''}|${files}`).digest('hex').slice(0, 16);
 }
 
