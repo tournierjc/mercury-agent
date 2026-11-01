@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { existsSync, mkdtempSync, readdirSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getDefaultConfig } from '../../utils/config.js';
@@ -346,5 +346,76 @@ describe('web bots API — avatars', () => {
 
     manager.store.delete('painter');
     expect(existsSync(join(root, 'bots', 'painter'))).toBe(false);
+  });
+});
+
+describe('web bots API — files on a bot message', () => {
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  let savedHome: string | undefined;
+
+  beforeEach(() => {
+    // Uploads land in `<mercury home>/uploads`: keep them in this test's folder, never the real home.
+    savedHome = process.env.MERCURY_HOME;
+    process.env.MERCURY_HOME = root;
+    store.create({ id: 'painter', name: 'Painter' });
+  });
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.MERCURY_HOME;
+    else process.env.MERCURY_HOME = savedHome;
+  });
+
+  const send = (body: unknown) =>
+    app.request('/api/bots/painter/message', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  it('queues a photo with the job and names it in the response', async () => {
+    const res = await send({ message: '', attachments: [{ name: 'dot.png', data: PNG.toString('base64') }] });
+
+    expect(res.status).toBe(202);
+    await expect(jreq(res)).resolves.toMatchObject({
+      accepted: true,
+      status: 'accepted',
+      attachments: [{ name: 'dot.png', kind: 'image' }],
+    });
+  });
+
+  it('deletes the files of a retry the queue already holds', async () => {
+    // The first copy belongs to the queued job; the retry's copy has no job to read it.
+    vi.spyOn(manager, 'enqueue').mockReturnValue({ jobId: 'queued', accepted: true, duplicated: true });
+    const res = await send({ message: 'what is this?', attachments: [{ name: 'dot.png', data: PNG.toString('base64') }] });
+
+    expect(res.status).toBe(202);
+    await expect(jreq(res)).resolves.toMatchObject({ accepted: true, jobId: 'queued' });
+    const stored = readdirSync(join(root, 'uploads'), { recursive: true, withFileTypes: true }).filter(e => e.isFile());
+    expect(stored).toHaveLength(0);
+  });
+
+  it('still takes a plain message with no files', async () => {
+    const res = await send({ message: 'check the logs' });
+    expect(res.status).toBe(202);
+    const body = await jreq(res);
+    expect(body).toMatchObject({ accepted: true });
+    expect(body.attachments).toBeUndefined();
+  });
+
+  it('refuses a file it cannot read, and writes nothing', async () => {
+    const before = existsSync(join(root, 'uploads'));
+    const res = await send({ message: 'look', attachments: [{ data: Buffer.from('hello').toString('base64') }] });
+
+    expect(res.status).toBe(400);
+    await expect(jreq(res)).resolves.toEqual({
+      error: 'attachment 1 is not a supported image (png, jpeg, webp, gif) or PDF',
+    });
+    expect(existsSync(join(root, 'uploads'))).toBe(before);
+  });
+
+  it('requires something to say when there is nothing attached', async () => {
+    const res = await send({ message: '   ' });
+    expect(res.status).toBe(400);
+    await expect(jreq(res)).resolves.toEqual({ error: 'message is required' });
   });
 });
