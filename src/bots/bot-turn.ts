@@ -587,7 +587,7 @@ export function resolveTurnLimits(manifest: BotManifest, overrides?: Partial<Bot
 /**
  * The text a failure is classified on: the message, and what the error wraps.
  *
- * The AI SDK reports a cut stream as « Failed to process successful response » and keeps the real
+ * The AI SDK reports a cut stream as "Failed to process successful response" and keeps the real
  * reason in `cause` — an ECONNRESET, a body cut mid-read, a JSON parse error. Reading only the
  * message sent every one of those to unknown_error: no retry, DLQ, needs-you. A network blip then
  * looked like a permanent fault, and the owner was told a bot had failed when it had merely lost

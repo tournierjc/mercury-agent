@@ -1,13 +1,12 @@
 /**
- * Texte sûr pour un corps JSON destiné à un fournisseur.
+ * Text that is safe to put in a JSON body sent to a provider.
  *
- * Un surrogate UTF-16 isolé — ce que produit n'importe quelle coupe par index sur une chaîne qui
- * contient un emoji — traverse `JSON.stringify` sous la forme `\ud83c`, et certains serveurs
- * refusent le corps entier : DeepSeek répond « 400 Failed to parse the request body as JSON:
- * messages[6].content: unexpected end of hex escape ». Mesuré sur api.deepseek.com : la même
- * chaîne avec le surrogate *brut* en UTF-8 passe (200), la même en séquence d'échappement est
- * rejetée (400). La coupe doit donc tomber entre deux points de code, et le texte envoyé ne doit
- * plus contenir de moitié de paire.
+ * A lone UTF-16 surrogate — what any index-based slice of a string holding an emoji produces —
+ * travels through `JSON.stringify` as `\ud83c`, and some servers reject the whole body for it:
+ * DeepSeek answers "400 Failed to parse the request body as JSON: messages[6].content: unexpected
+ * end of hex escape". Measured against api.deepseek.com: the same string with the *raw* surrogate
+ * in UTF-8 passes (200), the same one as an escape sequence is rejected (400). So a cut has to land
+ * between two code points, and the text we send must no longer hold half a pair.
  */
 
 const HIGH_SURROGATE_START = 0xd800;
@@ -24,8 +23,8 @@ function isLow(code: number): boolean {
 }
 
 /**
- * Retire les surrogates isolés. Une paire valide (emoji) est conservée telle quelle : seules les
- * moitiés orphelines — celles qui font échouer le serveur — disparaissent.
+ * Drops lone surrogates. A valid pair (an emoji) is kept as it is: only the orphaned halves — the
+ * ones that make the server fail — disappear.
  */
 export function stripLoneSurrogates(text: string): string {
   let out = '';
@@ -38,22 +37,22 @@ export function stripLoneSurrogates(text: string): string {
         i += 1;
         continue;
       }
-      continue; // high sans low : on jette la moitié
+      continue; // high without low: drop the half
     }
-    if (isLow(code)) continue; // low sans high : on jette la moitié
+    if (isLow(code)) continue; // low without high: drop the half
     out += text[i];
   }
   return out;
 }
 
 /**
- * Coupe à `max` caractères sans jamais séparer une paire de surrogates, puis retire ce qui
- * resterait d'isolé. `max` compte des unités UTF-16, comme `String.prototype.length`.
+ * Cuts at `max` characters without ever splitting a surrogate pair, then drops whatever would still
+ * be lone. `max` counts UTF-16 units, like `String.prototype.length`.
  */
 export function truncateText(text: string, max: number): string {
   if (max <= 0) return '';
   if (text.length <= max) return stripLoneSurrogates(text);
   let end = max;
-  if (end > 0 && isHigh(text.charCodeAt(end - 1))) end -= 1; // la paire commençait juste avant la coupe
+  if (end > 0 && isHigh(text.charCodeAt(end - 1))) end -= 1; // the pair started just before the cut
   return stripLoneSurrogates(text.slice(0, end));
 }
