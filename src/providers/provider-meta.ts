@@ -29,6 +29,7 @@ export const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
   mercuryCloud: { label: 'Mercury Cloud', kind: 'account', blurb: 'The quick start: sign in and chat. No API keys; models from every major lab on one account.', needsKey: false, needsBaseUrl: false, signInOnly: true },
   aimlapi: { label: 'AI/ML API', kind: 'gateway', blurb: '350+ models from every major lab on one key.', needsKey: true, needsBaseUrl: false, keyUrl: 'https://aimlapi.com/app/keys' },
   openai: { label: 'OpenAI', kind: 'cloud', blurb: 'GPT models. The same key powers voice and voice notes.', needsKey: true, needsBaseUrl: false, keyUrl: 'https://platform.openai.com/api-keys', keyHint: 'sk-…' },
+  openrouter: { label: 'OpenRouter', kind: 'gateway', blurb: 'One key for every vendor: OpenAI, Anthropic, DeepSeek, Qwen, open models. Route each request by host, order or price.', needsKey: true, needsBaseUrl: false, keyUrl: 'https://openrouter.ai/settings/keys', keyHint: 'sk-or-…' },
   anthropic: { label: 'Anthropic', kind: 'cloud', blurb: 'Claude models.', needsKey: true, needsBaseUrl: false, keyUrl: 'https://console.anthropic.com/settings/keys', keyHint: 'sk-ant-…' },
   deepseek: { label: 'DeepSeek', kind: 'cloud', blurb: 'DeepSeek chat and reasoning models.', needsKey: true, needsBaseUrl: false, keyUrl: 'https://platform.deepseek.com/api_keys', keyHint: 'sk-…' },
   grok: { label: 'Grok (xAI)', kind: 'cloud', blurb: 'Grok models. The same key powers Grok voice.', needsKey: true, needsBaseUrl: false, keyUrl: 'https://console.x.ai', keyHint: 'xai-…' },

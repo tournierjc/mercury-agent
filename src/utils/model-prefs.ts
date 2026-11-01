@@ -174,6 +174,7 @@ export function applyReasoningToBody(body: Record<string, unknown>, level: Reaso
 const PROVIDER_LABELS: Record<string, string> = {
   chatgptWeb: 'ChatGPT',
   openai: 'OpenAI API',
+  openrouter: 'OpenRouter',
   anthropic: 'Claude (API)',
   deepseek: 'DeepSeek',
   grok: 'Grok',

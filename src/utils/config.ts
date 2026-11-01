@@ -67,6 +67,7 @@ export type ProviderName =
   | 'mercuryCloud'
   | 'aimlapi'
   | 'openai'
+  | 'openrouter'
   | 'anthropic'
   | 'deepseek'
   | 'grok'
@@ -112,6 +113,7 @@ export interface MercuryConfig {
     aimlapi: ProviderConfig;
     mercuryCloud: ProviderConfig;
     openai: ProviderConfig;
+    openrouter: ProviderConfig;
     anthropic: ProviderConfig;
     deepseek: ProviderConfig;
     grok: ProviderConfig;
@@ -381,6 +383,16 @@ export function getDefaultConfig(): MercuryConfig {
         baseUrl: getEnv('OPENAI_BASE_URL', 'https://api.openai.com/v1'),
         model: getEnv('OPENAI_MODEL', 'gpt-4o-mini'),
         enabled: getEnvBool('OPENAI_ENABLED', true),
+      },
+      // OpenRouter is an OpenAI-compatible gateway over one key: the base URL is the whole
+      // difference, so it rides the same client as the other compat providers.
+      openrouter: {
+        name: 'openrouter',
+        apiKey: getEnv('OPENROUTER_API_KEY', ''),
+        baseUrl: getEnv('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1'),
+        model: getEnv('OPENROUTER_MODEL', ''),
+        enabled: getEnvBool('OPENROUTER_ENABLED', false),
+        vision: getEnvOptionalBool('OPENROUTER_VISION'),
       },
       anthropic: {
         name: 'anthropic',

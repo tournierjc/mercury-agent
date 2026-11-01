@@ -21,6 +21,10 @@ export async function createProvider(pc: ProviderConfig, tokenStore?: import('..
     // this entirely.
     const { OpenAICompatProvider } = await import('./openai-compat.js');
     return new OpenAICompatProvider(pc, { useChatApi: true });
+  } else if (pc.name === 'openrouter') {
+    // A gateway over Chat Completions: same client as the other compat providers, one key.
+    const { OpenAICompatProvider } = await import('./openai-compat.js');
+    return new OpenAICompatProvider(pc, { useChatApi: true });
   } else if (pc.name === 'aimlapi') {
     // OpenAI-compatible gateway. Chat Completions rather than Responses: the
     // catalogue is mostly third-party models reached through that surface.

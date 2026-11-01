@@ -200,6 +200,7 @@ const PROVIDER_OPTIONS: Array<{ key: ProviderName; label: string }> = [
   { key: 'aimlapi', label: 'AI/ML API (350+ models on one key)' },
   { key: 'deepseek', label: 'DeepSeek' },
   { key: 'openai', label: 'OpenAI' },
+  { key: 'openrouter', label: 'OpenRouter (one key, every vendor)' },
   { key: 'anthropic', label: 'Anthropic' },
   { key: 'githubCopilot', label: 'GitHub Copilot' },
   { key: 'grok', label: 'Grok (xAI)' },
