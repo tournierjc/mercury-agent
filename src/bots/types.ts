@@ -169,6 +169,15 @@ export interface BotPipelineConfig {
  * fail-closed, so only explicit grants exist.
  */
 export interface BotPermissionsFile {
+  /**
+   * The tier the owner picked, written next to the grants it expands to.
+   *
+   * Without it the file is a set of deny/path rules with no name: the app could not tell which
+   * of Lecture / Écriture / Opérateur / Complet was applied, so choosing one looked like doing
+   * nothing. Absent on files written before this field — the app then infers the tier from the
+   * grants and says so.
+   */
+  tier?: 'readonly' | 'builder' | 'operator' | 'full';
   paths?: BotPathScope[];
   blockedCommands?: string[];
   /**

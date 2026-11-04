@@ -46,6 +46,9 @@ describe('GET /api/status', () => {
   });
 });
 
+/** The budget a bare test runtime starts with, so a test can restore it. */
+const otherwiseDefaultBudget = () => 1_000_000;
+
 describe('GET /api/usage', () => {
   it('is available when the tracker holds a real record', async () => {
     writeUsage({
@@ -65,12 +68,34 @@ describe('GET /api/usage', () => {
     try {
       const res = await system.request('/api/usage');
       const body = (await res.json()) as Record<string, unknown>;
-
       expect(body.available).toBe(true);
       expect(body.dailyUsed).toBe(1234);
       expect(body.dailyBudget).toBe(80000000);
     } finally {
       updateStatus({ tokenBudget: live });
+    }
+    const res = await system.request('/api/usage');
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.available).toBe(true);
+    expect(body.dailyUsed).toBe(1234);
+    // The live budget wins over the snapshot in the file; here they agree.
+    expect(body.dailyBudget).toBe(otherwiseDefaultBudget());
+  });
+
+  it('reports the budget the runtime enforces, not the snapshot in the tracker', async () => {
+    // The case that bit: the owner raised the limit, the file still carried the old number, and the
+    // console showed a budget (and a `remaining`) nothing was enforcing.
+    writeUsage({ dailyUsed: 152_867_556, dailyBudget: 80_000_000, lastResetDate: '2026-10-28', requestLog: [] });
+    updateStatus({ tokenBudget: 500_000_000 });
+
+    const res = await system.request('/api/usage');
+    const body = (await res.json()) as Record<string, unknown>;
+
+    try {
+      expect(body.dailyBudget).toBe(500_000_000);
+      expect(body.remaining).toBe(500_000_000 - 152_867_556);
+    } finally {
+      updateStatus({ tokenBudget: otherwiseDefaultBudget() });
     }
   });
 

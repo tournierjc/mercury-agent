@@ -14,7 +14,7 @@ import { UserMemoryStore as UserMemoryStoreImpl } from '../memory/user-memory.js
 import { BotInbox } from './inbox.js';
 import { BotApprovals, durableGrant } from './approvals.js';
 import { detectTier } from './permission-tiers.js';
-import { BotStore, deliverableFileName, BOT_JOURNAL_FILENAME, BOT_PERMISSIONS_FILENAME, isValidCronExpression } from './store.js';
+import { BotStore, deliverableFileName, BOT_JOURNAL_FILENAME, BOT_PERMISSIONS_FILENAME, isValidCronExpression, MAX_FLEET_DEPTH } from './store.js';
 import { BotJournal, type BotTranscript, type BotUsage } from './journal.js';
 import { BotQueue, idempotencyKeyFor, LEASE_SECONDS, type DurableBotJob } from './queue.js';
 import { sweepSharedSandbox } from './retention.js';
@@ -44,6 +44,12 @@ import type {
   BotTrigger,
 } from './types.js';
 
+/**
+ * How much of a turn's answer the journal keeps. Enough for a full chat answer (the transcript
+ * has the rest); the file is JSONL per bot, so this bounds growth without truncating replies.
+ */
+const JOURNAL_SUMMARY_MAX = 8000;
+
 export interface BotJob {
   id: string;
   botId: string;
@@ -55,6 +61,8 @@ export interface BotJob {
   source?: { channelType: string; channelId: string };
   /** Photos/PDFs to hand the turn; `web/api/uploads.ts` already wrote them to disk. */
   attachments?: ChannelAttachment[];
+  /** 'chat' answers the owner in the app; 'work' (default) delivers. */
+  mode?: 'work' | 'chat';
   createdAt: number;
   attempts: number;
   /** Scheduler task id for cron runs (routine gating + no-outcome streaks). */
@@ -435,7 +443,7 @@ export class BotManager {
     return this.journalFor(botId);
   }
 
-  enqueue(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; attachments?: ChannelAttachment[] }): { jobId: string; accepted: boolean; reasonCode?: string; duplicated?: boolean } {
+  enqueue(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; attachments?: ChannelAttachment[]; mode?: 'work' | 'chat' }): { jobId: string; accepted: boolean; reasonCode?: string; duplicated?: boolean } {
     const manifest = this.store.get(botId);
     if (!manifest) return { jobId: '', accepted: false, reasonCode: 'target_unknown' };
     if (!manifest.enabled || this.disabled.has(botId)) return { jobId: '', accepted: false, reasonCode: 'target_disabled' };
@@ -481,6 +489,7 @@ export class BotManager {
       fromBot: job.fromBot,
       source: job.source,
       attachments: job.attachments,
+      mode: job.mode,
       attempts: job.attempts ?? 0,
       createdAt: Date.now(),
       idempotencyKey: idempotencyKeyFor(botId, job.trigger, job.prompt, job.fromBot, job.attachments),
@@ -489,7 +498,10 @@ export class BotManager {
       return { jobId: durable.job.id, accepted: true, duplicated: true };
     }
     const id = durable.job.id;
-    queue.push({ id, botId, trigger: job.trigger, prompt: job.prompt, fromBot: job.fromBot, source: job.source, createdAt: durable.job.createdAt, attempts: durable.job.attempts, routineId: job.routineId });
+    // `mode` travels with the in-memory job too: the durable record and the queue are two
+    // copies of the same job, and a field forgotten in one of them silently turns a chat turn
+    // back into a work turn (which is how a teammate answered "Nothing to do" to a question).
+    queue.push({ id, botId, trigger: job.trigger, prompt: job.prompt, fromBot: job.fromBot, source: job.source, mode: job.mode, attachments: job.attachments, createdAt: durable.job.createdAt, attempts: durable.job.attempts, routineId: job.routineId });
     this.pump(botId);
     return { jobId: id, accepted: true };
   }
@@ -966,7 +978,10 @@ export class BotManager {
         durationMs: Date.now() - job.createdAt,
         tokensIn: output.tokensIn,
         tokensOut: output.tokensOut,
-        summary: output.output.slice(0, 300),
+        // The whole answer, not a teaser: a client that cannot fetch the transcript (a race at
+        // turn end, an offline phone) must still show what the bot said. 300 characters cut
+        // answers mid-sentence and made a delivered answer look like it had vanished.
+        summary: output.output.slice(0, JOURNAL_SUMMARY_MAX),
         ...(output.report ? { report: output.report.kind, ...(output.report.complete ? { complete: true } : {}) } : {}),
         error: output.error,
         reasonCode: output.reasonCode,
@@ -983,7 +998,12 @@ export class BotManager {
       };
       const journal = this.journalFor(botId);
       journal.append(record);
-      journal.writeTranscript(record, { prompt: job.prompt, output: output.output, trace: output.trace });
+      journal.writeTranscript(record, {
+        prompt: job.prompt,
+        output: output.output,
+        trace: output.trace,
+        reasoning: output.reasoning,
+      });
       this.lastRun.set(botId, { at: Date.now(), state: record.state });
       this.needsYou.delete(botId);
       this.recordBotTokens(botId, manifest, output.tokensIn + output.tokensOut);
@@ -1306,6 +1326,7 @@ export class BotManager {
       input: {
         manifest,
         trigger: job.trigger,
+        mode: job.mode,
         prompt: job.prompt,
         attachments: job.attachments,
         persona: this.store.readPersona(botId),
@@ -1313,7 +1334,11 @@ export class BotManager {
         pollMail: () => this.drainMailbox(botId),
         sandbox: { workspace: this.store.sandboxDir(botId), shared: this.store.sharedSandboxDir() },
         deliverablesDir: this.store.deliverablesDir(botId),
-        expects: this.expectationFor(manifest, job),
+        // A chat turn expects a reply, not a deliverable: with the 'work' contract the
+        // outcome gate would nudge it to "deliver something" and, producing nothing, it
+        // answers "Nothing to do" — the right behaviour for a task, the wrong one for a
+        // question.
+        expects: job.mode === 'chat' ? 'message' : this.expectationFor(manifest, job),
         recentRuns: this.recentRunsDigest(botId),
         stateNote: this.store.readState(botId),
         skillsPrompt,
@@ -1322,6 +1347,7 @@ export class BotManager {
         tools,
         userMemory,
         provider: resolveProvider(this.providers, manifest, this.config),
+        visionDeclared: (resolveProvider(this.providers, manifest, this.config) as { seesImages?: boolean }).seesImages,
         tokenBudget: this.tokenBudget,
         abortSignal: signal,
         // Pick up an interrupted run of this job where it stopped; checkpoint every step.
@@ -1553,10 +1579,11 @@ export class BotManager {
     if (lead.fleetRole !== 'lead') {
       return { ok: false, error: `**${lead.name}** is not a fleet lead — promote it with \`/bots promote ${leadId}\` first` };
     }
-    // Multi-level guard: no cycles, bounded depth (v1 supports 3 levels —
-    // e.g. CEO → Engineering Lead → Backend). Walk the lead's parent chain.
+    // Multi-level guard: no cycles, bounded depth (MAX_FLEET_DEPTH levels — e.g.
+    // CEO → Engineering Lead → Backend, the deepest level list() and crewOf() walk).
+    // `level` is the level the NEW bot would take: one below the lead it joins.
     let ancestor: string | undefined = leadId;
-    let depth = 0;
+    let level = 1;
     const seen = new Set<string>();
     while (ancestor) {
       if (seen.has(ancestor)) return { ok: false, error: 'Fleet cycle detected in parent chain' };
@@ -1564,8 +1591,13 @@ export class BotManager {
       if (ancestor === spec.id.toLowerCase()) {
         return { ok: false, error: `Cannot add **${spec.id}** — it would become its own ancestor` };
       }
+      // Refuse the level the reader cannot reach: a bot created below this lead
+      // would exist on disk and answer by id while staying out of the roster.
+      if (level >= MAX_FLEET_DEPTH) {
+        return { ok: false, error: `Fleet nesting is capped at ${MAX_FLEET_DEPTH} levels` };
+      }
       ancestor = this.store.get(ancestor)?.parent;
-      if (++depth > 3) return { ok: false, error: 'Fleet nesting is capped at 3 levels' };
+      level += 1;
     }
     // Replay-safety BEFORE the crew cap: a re-run "build the crew" turn
     // (durable job replayed after an interrupted session) re-derives its
@@ -1606,6 +1638,90 @@ export class BotManager {
     this.store.ensurePermissions(manifest.id);
     this.invalidateRuntime(leadId); // lead's roster + fleet prompt change
     logger.info({ leadId, crewId: spec.id }, 'Crew member added to fleet');
+    return { ok: true, manifest };
+  }
+
+  /**
+   * Attach a bot that already exists to a lead's fleet.
+   *
+   * `addCrew` only creates: a solo bot could not be put under a lead without editing its
+   * manifest by hand, which is exactly what a roster with a "add a member" sheet should spare
+   * you. Adoption is the same relationship as creation — the member's `parent` is the only
+   * state — so the store's `update` moves the profile into the lead's folder and validates the
+   * depth on the way.
+   */
+  adoptCrew(leadId: string, memberId: string): { ok: true; manifest: BotManifest } | { ok: false; error: string } {
+    const lead = this.store.get(leadId);
+    if (!lead) return { ok: false, error: `No bot "${leadId}"` };
+    if (lead.fleetRole !== 'lead') {
+      return { ok: false, error: `**${lead.name}** is not a fleet lead — promote it first` };
+    }
+    const member = this.store.get(memberId);
+    if (!member) return { ok: false, error: `No bot "${memberId}"` };
+    if (member.id === lead.id) return { ok: false, error: 'A bot cannot join its own fleet' };
+    if (member.parent === leadId) return { ok: true, manifest: member };
+    if (member.parent) {
+      return { ok: false, error: `**${member.name}** is already in **${member.parent}**'s fleet — remove it from there first` };
+    }
+    // A bot promoted to lead but leading nobody is still solo: adopting it demotes it, which
+    // is what the owner is asking for. Only a lead with actual members cannot join.
+    const ownCrew = this.store.crewOf(member.id);
+    if (ownCrew.length > 0) {
+      return { ok: false, error: `**${member.name}** leads ${ownCrew.length} équipier(s) — retire them first, or add them to this fleet instead` };
+    }
+    const crew = this.store.crewOf(leadId);
+    const cap = this.maxCrew();
+    if (crew.length >= cap) {
+      return { ok: false, error: `Fleet is at the crew cap (${crew.length}/${cap}) — retire a member first` };
+    }
+    // Depth: the member would take one level below this lead.
+    let ancestor: string | undefined = leadId;
+    let level = 1;
+    const seen = new Set<string>();
+    while (ancestor) {
+      if (seen.has(ancestor)) return { ok: false, error: 'Fleet cycle detected in parent chain' };
+      seen.add(ancestor);
+      if (level >= MAX_FLEET_DEPTH) return { ok: false, error: `Fleet nesting is capped at ${MAX_FLEET_DEPTH} levels` };
+      ancestor = this.store.get(ancestor)?.parent;
+      level += 1;
+    }
+    const canMessage = Array.from(new Set([...(member.comms?.canMessage ?? []), leadId]));
+    const manifest = this.store.update(member.id, (m) => {
+      m.fleetRole = 'crew';
+      m.parent = leadId;
+      m.comms = { ...(m.comms ?? {}), canMessage };
+    });
+    this.invalidateRuntime(leadId);
+    this.invalidateRuntime(member.id);
+    logger.info({ leadId, crewId: member.id }, 'Existing bot adopted into a fleet');
+    return { ok: true, manifest };
+  }
+
+  /**
+   * Take a bot out of a lead's fleet: it becomes solo again.
+   *
+   * The `parent` is the only state, so removing it is the whole operation — the store's
+   * `update` moves the profile back to the root and fires the relocation hook, exactly as
+   * adoption moved it in. The lead is dropped from `comms.canMessage` so the detached bot does
+   * not keep a channel it no longer has.
+   */
+  detachCrew(leadId: string, memberId: string): { ok: true; manifest: BotManifest } | { ok: false; error: string } {
+    const lead = this.store.get(leadId);
+    if (!lead) return { ok: false, error: `No bot "${leadId}"` };
+    const member = this.store.get(memberId);
+    if (!member) return { ok: false, error: `No bot "${memberId}"` };
+    if (member.parent !== leadId) {
+      return { ok: false, error: `**${member.name}** is not in **${lead.name}**'s fleet` };
+    }
+    const canMessage = (member.comms?.canMessage ?? []).filter((id) => id !== leadId);
+    const manifest = this.store.update(memberId, (m) => {
+      delete m.parent;
+      delete m.fleetRole;
+      m.comms = { ...(m.comms ?? {}), canMessage };
+    });
+    this.invalidateRuntime(leadId);
+    this.invalidateRuntime(memberId);
+    logger.info({ leadId, crewId: memberId }, 'Crew member detached from its fleet');
     return { ok: true, manifest };
   }
 

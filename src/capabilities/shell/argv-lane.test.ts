@@ -148,10 +148,20 @@ describe('pinned binaries and minimal env (#103)', () => {
   afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); root = undefined; });
 
   it('pinned search dirs and PATH never come from process.env.PATH', () => {
-    const dirs = pinnedSearchDirs('linux', { PATH: '/tmp/evil:/usr/bin' });
-    expect(dirs).not.toContain('/tmp/evil');
-    expect(dirs).toContain('/usr/bin');
-    expect(pinnedPath('linux', {})).toBe('/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin');
+    // The install target is pinned to an absent directory: on a machine where tools were installed
+    // from the phone it is appended (see the `installed tools` block), and this assertion is about
+    // the system list itself — the machine's ~ must not decide what it expects.
+    const before = process.env.MERCURY_TOOLS_DIR;
+    process.env.MERCURY_TOOLS_DIR = join(tmpdir(), 'mercury-tools-never-installed');
+    try {
+      const dirs = pinnedSearchDirs('linux', { PATH: '/tmp/evil:/usr/bin' });
+      expect(dirs).not.toContain('/tmp/evil');
+      expect(dirs).toContain('/usr/bin');
+      expect(pinnedPath('linux', {})).toBe('/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin');
+    } finally {
+      if (before === undefined) delete process.env.MERCURY_TOOLS_DIR;
+      else process.env.MERCURY_TOOLS_DIR = before;
+    }
   });
 
   it('on Termux, pins $PREFIX/bin first (there is no /usr/bin there)', () => {
@@ -221,5 +231,56 @@ describe('planArgvExecution', () => {
     expect(planArgvExecution('git log | head', resolver)).toBeNull();
     expect(planArgvExecution('find . -delete', resolver)).toBeNull();
     expect(planArgvExecution('ls', () => undefined)).toBeNull();
+  });
+  describe('installed tools', () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, chmodSync } = require('node:fs') as typeof import('node:fs');
+    const { tmpdir } = require('node:os') as typeof import('node:os');
+
+    function withToolsDir(fn: (bin: string) => void): void {
+      const root = mkdtempSync(join(tmpdir(), 'mercury-tools-'));
+      const bin = join(root, 'bin');
+      mkdirSync(bin);
+      const before = process.env.MERCURY_TOOLS_DIR;
+      process.env.MERCURY_TOOLS_DIR = root;
+      try {
+        fn(bin);
+      } finally {
+        if (before === undefined) delete process.env.MERCURY_TOOLS_DIR;
+        else process.env.MERCURY_TOOLS_DIR = before;
+      }
+    }
+
+    it('searches the install target last, never first', () => {
+      withToolsDir((bin) => {
+        const dirs = pinnedSearchDirs('linux');
+
+        // System binaries win: a downloaded `git` must not shadow the real one.
+        expect(dirs[0]).toBe('/usr/bin');
+        expect(dirs[dirs.length - 1]).toBe(bin);
+        expect(pinnedPath('linux')).toContain(bin);
+      });
+    });
+
+    it('leaves the pinned PATH alone when nothing was installed', () => {
+      const before = process.env.MERCURY_TOOLS_DIR;
+      process.env.MERCURY_TOOLS_DIR = join(tmpdir(), 'mercury-tools-absent');
+      try {
+        const dirs = pinnedSearchDirs('linux');
+        expect(dirs).toEqual(['/usr/bin', '/bin', '/usr/sbin', '/sbin', '/usr/local/bin', '/opt/homebrew/bin']);
+      } finally {
+        if (before === undefined) delete process.env.MERCURY_TOOLS_DIR;
+        else process.env.MERCURY_TOOLS_DIR = before;
+      }
+    });
+
+    it('resolves an installed binary the lane used to call missing', () => {
+      withToolsDir((bin) => {
+        const gh = join(bin, 'gh');
+        writeFileSync(gh, '#!/bin/sh\nexit 0\n');
+        chmodSync(gh, 0o755);
+
+        expect(resolveFromDirs('gh', pinnedSearchDirs('linux'))).toBe(gh);
+      });
+    });
   });
 });

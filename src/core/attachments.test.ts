@@ -55,6 +55,7 @@ describe('chat attachments for the model', () => {
     expect(modelReadsPdf('openai', 'gpt-5.2-chat-latest')).toBe(true);
     expect(modelReadsPdf('openai', 'gpt-3.5-turbo')).toBe(false);
   });
+
 });
 
 describe('a declared capability beats the name-based guess', () => {

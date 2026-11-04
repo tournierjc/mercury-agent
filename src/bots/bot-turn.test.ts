@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // Mock only streamText; stepCountIs must stay real so the turn loop's
 // per-round step budget still applies. The mock must drive onStepFinish
@@ -127,6 +130,15 @@ describe('runBotTurn step-budget continuation', () => {
     // ship long leader-bot turns straight to the DLQ instead of retrying.
     expect(classifyFailure(new Error('The operation timed out.'))).toBe('provider_timeout');
     expect(classifyFailure(new Error('Request timed out after 60000ms'))).toBe('provider_timeout');
+    // The SDK hides a cut stream behind its own wrapper and keeps the reason in `cause`: the live
+    // failure (`Failed to process successful response`, 6 runs in four days) was classified
+    // unknown_error — no retry, DLQ, needs-you — because only the message was read.
+    const wrapped = (cause: unknown) =>
+      Object.assign(new Error('Failed to process successful response'), { cause });
+    expect(classifyFailure(wrapped(new Error('terminated')))).toBe('provider_timeout');
+    expect(classifyFailure(wrapped(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })))).toBe('provider_timeout');
+    // A 2xx nobody could parse is a provider hiccup, not a permanent condition.
+    expect(classifyFailure(wrapped(new SyntaxError('Unexpected end of JSON input')))).toBe('provider_empty');
     // Still-permanent things stay permanent.
     expect(classifyFailure(new Error('401 unauthorized'))).toBe('provider_auth');
     expect(classifyFailure(new Error('permission denied by policy'))).toBe('permission_denied');
@@ -183,6 +195,59 @@ describe('runBotTurn live thinking events', () => {
     expect(last.reasoningTail).toContain('I should check the prices');
     expect(last.reasoningTail).toContain('and now act');
     expect(last.textTail).toBe('partial reply more');
+  });
+
+  it('keeps each step\'s thinking in the turn output, not just a rolling tail', async () => {
+    // The live feed only ever carried the last few hundred characters. What the bot weighed is
+    // what explains a run after the fact, so it is kept per step.
+    mockedStreamText.mockImplementationOnce((opts: any) =>
+      streamedResult({
+        text: 'final reply',
+        finishReason: 'stop',
+        fullStream: [
+          { type: 'start-step', request: {}, warnings: [] },
+          { type: 'reasoning-delta', id: 'r', text: 'First: the price table is stale.' },
+          { type: 'start-step', request: {}, warnings: [] },
+          { type: 'reasoning-delta', id: 'r', text: 'Second: write the correction, then verify.' },
+          { type: 'text-delta', id: 't', text: 'final reply' },
+        ],
+      }),
+    );
+    const output = await runBotTurn(inputWithActivity());
+
+    expect(output.status).toBe('completed');
+    expect(output.reasoning ?? []).toHaveLength(2);
+    expect((output.reasoning ?? []).map((b: any) => b.text)).toEqual([
+      'First: the price table is stale.',
+      'Second: write the correction, then verify.',
+    ]);
+    expect(output.reasoningTruncated).toBe(false);
+  });
+
+  it('bounds the thinking it keeps, newest first, and says so', async () => {
+    // A long run must not turn its transcript into a novel, and a silently shortened record would
+    // read as if the bot had thought nothing before the drop.
+    const long = 'x'.repeat(5_000);
+    mockedStreamText.mockImplementationOnce((opts: any) =>
+      streamedResult({
+        text: 'done',
+        finishReason: 'stop',
+        fullStream: [
+          ...Array.from({ length: 8 }, () => [
+            { type: 'start-step', request: {}, warnings: [] },
+            { type: 'reasoning-delta', id: 'r', text: long },
+          ]).flat(),
+          { type: 'text-delta', id: 't', text: 'done' },
+        ],
+      }),
+    );
+    const output = await runBotTurn(inputWithActivity());
+
+    expect(output.reasoningTruncated).toBe(true);
+    const kept = (output.reasoning ?? []).reduce((n: number, b: any) => n + b.text.length, 0);
+    expect(kept).toBeLessThanOrEqual(24_000);
+    // What survives is the newest thinking, and one block always survives.
+    expect((output.reasoning ?? []).length).toBeGreaterThanOrEqual(1);
   });
 
   it('inserts a paragraph break at step boundaries so step narrations do not run together', async () => {
@@ -432,23 +497,54 @@ describe('shared-folder write budget', () => {
 
 describe('turnCaption — files without a caption', () => {
   const img = { kind: 'image' as const, path: '/tmp/a.png', mime: 'image/png', name: 'a.png' };
-
   it('keeps a real prompt untouched', () => {
     expect(turnCaption('  describe this  ', [img])).toBe('describe this');
   });
-
   it('names the files when there is no text at all', () => {
     // An empty text block is rejected by providers: the photo says what it is.
     expect(turnCaption('', [img])).toBe('(Attached: a.png)');
     expect(turnCaption('   ', [img, { ...img, name: 'b.pdf', kind: 'document' as const }]))
       .toBe('(Attached: a.png, b.pdf)');
   });
-
   it('falls back to "file" when a name is missing, never to an empty string', () => {
     expect(turnCaption('', [{ kind: 'image', path: '/tmp/x.webp' }])).toBe('(Attached: file)');
   });
-
   it('stays empty with neither text nor files', () => {
     expect(turnCaption('', [])).toBe('');
+  });
+});
+
+describe('runBotTurn with a photo', () => {
+  // A real file: the helper reads the bytes, so a fake path would only test the fake.
+  const png = join(mkdtempSync(join(tmpdir(), 'bot-turn-png-')), 'dot.png');
+  writeFileSync(png, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
+  const file = [{ kind: 'image' as const, path: png, mime: 'image/png', name: 'dot.png' }];
+  it('hands the image to a model that sees, as a part of the user message', async () => {
+    process.env.OPENAI_COMPAT_VISION = 'true';
+    mockedStreamText.mockImplementation(impl(() => finished('vu')));
+    await runBotTurn(turnInput({
+      prompt: 'Revois cette capture',
+      attachments: file,
+      provider: { name: 'openaiCompat', getModel: () => 'qwen3.8-flash-next', getModelInstance: () => ({}) },
+      manifest: { id: 'oeil', name: 'Œil', enabled: true, autonomy: { maxSteps: 1 } },
+    }));
+    delete process.env.OPENAI_COMPAT_VISION;
+    const opts = mockedStreamText.mock.calls[0][0] as any;
+    const carrying = opts.messages.filter((m: any) => Array.isArray(m.content));
+    expect(carrying).toHaveLength(1);
+    expect(carrying[0].content[0]).toMatchObject({ type: 'text', text: 'Revois cette capture' });
+    expect(carrying[0].content.some((part: any) => part.type === 'image' && part.mediaType === 'image/png')).toBe(true);
+  });
+  it('tells a text-only model what it is missing instead of pretending', async () => {
+    mockedStreamText.mockImplementation(impl(() => finished('je ne vois pas')));
+    await runBotTurn(turnInput({
+      prompt: 'Revois cette capture',
+      attachments: file,
+    }));
+    const opts = mockedStreamText.mock.calls[0][0] as any;
+    const carrying = opts.messages.filter((m: any) => Array.isArray(m.content));
+    expect(carrying).toHaveLength(1);
+    expect(String(carrying[0].content[0].text)).toContain("can't view images");
+    expect(carrying[0].content.some((part: any) => part.type === 'image')).toBe(false);
   });
 });

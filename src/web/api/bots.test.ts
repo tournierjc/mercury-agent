@@ -231,19 +231,25 @@ describe('web bots API — deliverables folder (where results land)', () => {
     }
   });
 
-  it('a rejected edit is not announced — no phantom refresh on an unknown bot', async () => {
-    const seen: RosterFeed = [];
-    const unsubscribe = registerRosterClient({ send: (event, data) => seen.push({ event, data: data as RosterBody }) });
+  it('a rename reaches every open tab: the feed pushes the new name, not just the reply', async () => {
+    // The bug this pins: PATCH answered 200 with the new name, and the drawer — fed by the fleet
+    // feed, not by the reply — kept the old one until some unrelated roster change happened.
+    store.create({ id: 'scribed', name: 'Scribe' });
+    const seen: Array<{ event: string; data: any }> = [];
+    const unsubscribe = registerRosterClient({ send: (event, data) => seen.push({ event, data }) });
 
     try {
-      const res = await app.request('/api/bots/ghost', {
+      const res = await app.request('/api/bots/scribed', {
         method: 'PATCH',
-        body: JSON.stringify({ enabled: false }),
+        body: JSON.stringify({ name: 'Chroniqueur' }),
         headers: { 'Content-Type': 'application/json' },
       });
-      // The handler answers 400 for an unknown id, the same as the other malformed requests.
-      expect(res.status).toBe(400);
-      expect(seen.filter((e) => e.event === 'bot_roster')).toHaveLength(0);
+      expect(res.status).toBe(200);
+
+      const roster = seen.filter((e) => e.event === 'bot_roster').at(-1);
+      expect(roster, 'no roster event after the rename').toBeTruthy();
+      const renamed = roster!.data.bots.find((b: any) => b.id === 'scribed');
+      expect(renamed.name).toBe('Chroniqueur');
     } finally {
       unsubscribe();
     }
@@ -352,19 +358,16 @@ describe('web bots API — avatars', () => {
 describe('web bots API — files on a bot message', () => {
   const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
   let savedHome: string | undefined;
-
   beforeEach(() => {
     // Uploads land in `<mercury home>/uploads`: keep them in this test's folder, never the real home.
     savedHome = process.env.MERCURY_HOME;
     process.env.MERCURY_HOME = root;
     store.create({ id: 'painter', name: 'Painter' });
   });
-
   afterEach(() => {
     if (savedHome === undefined) delete process.env.MERCURY_HOME;
     else process.env.MERCURY_HOME = savedHome;
   });
-
   const send = (body: unknown) =>
     app.request('/api/bots/painter/message', {
       method: 'POST',
@@ -387,13 +390,11 @@ describe('web bots API — files on a bot message', () => {
     // The first copy belongs to the queued job; the retry's copy has no job to read it.
     vi.spyOn(manager, 'enqueue').mockReturnValue({ jobId: 'queued', accepted: true, duplicated: true });
     const res = await send({ message: 'what is this?', attachments: [{ name: 'dot.png', data: PNG.toString('base64') }] });
-
     expect(res.status).toBe(202);
     await expect(jreq(res)).resolves.toMatchObject({ accepted: true, jobId: 'queued' });
     const stored = readdirSync(join(root, 'uploads'), { recursive: true, withFileTypes: true }).filter(e => e.isFile());
     expect(stored).toHaveLength(0);
   });
-
   it('still takes a plain message with no files', async () => {
     const res = await send({ message: 'check the logs' });
     expect(res.status).toBe(202);
@@ -485,5 +486,100 @@ describe('web bots API — persona builder and plan', () => {
     expect(body.plan).toMatchObject({ shape: 'solo', crew: [] });
     expect(typeof body.maxCrew).toBe('number');
     expect(store.list().length).toBe(before);
+  });
+});
+
+describe('web bots API — rename', () => {
+  const post = (body: unknown) =>
+    app.request('/api/bots', { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
+  const patch = (id: string, body: unknown) =>
+    app.request(`/api/bots/${id}`, { method: 'PATCH', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
+
+  it('renames a bot, keeping its id and its folder', async () => {
+    await post({ id: 'probe', name: 'Probe A' });
+
+    const res = await patch('probe', { name: 'Probe B' });
+    expect(res.status).toBe(200);
+    const { bot } = await jreq(res);
+    expect(bot.id).toBe('probe');
+    expect(bot.name).toBe('Probe B');
+    // The display name is what the roster and the app read, and it is persisted, not just echoed.
+    expect(manager.store.get('probe')?.name).toBe('Probe B');
+    expect(readFileSync(join(root, 'bots', 'probe', 'bot.yaml'), 'utf-8')).toContain('name: Probe B');
+    expect(existsSync(join(root, 'bots', 'probe'))).toBe(true);
+  });
+
+  it('normalises the name and refuses one that is only whitespace', async () => {
+    await post({ id: 'spaced', name: 'Spaced' });
+
+    const { bot } = await jreq(await patch('spaced', { name: '  Mac   Web  ' }));
+    expect(bot.name).toBe('Mac Web');
+
+    const empty = await patch('spaced', { name: '   ' });
+    expect(empty.status).toBe(400);
+    expect(manager.store.get('spaced')?.name).toBe('Mac Web');
+  });
+
+  it('does not let a patch move the identity: the id is ignored', async () => {
+    await post({ id: 'fixed', name: 'Fixed' });
+
+    const { bot } = await jreq(await patch('fixed', { id: 'moved', name: 'Still fixed' }));
+    expect(bot.id).toBe('fixed');
+    expect(manager.store.exists('moved')).toBe(false);
+    expect(manager.store.get('fixed')?.name).toBe('Still fixed');
+  });
+
+  it('a rename moves the label, not the files: the deliverables folder is pinned once', async () => {
+    await post({ id: 'deliv', name: 'Deliv A' });
+    const before = store.pinDeliverablesFolder('deliv');
+    mkdirSync(before, { recursive: true });
+    writeFileSync(join(before, 'report.md'), '# ok');
+
+    const res = await patch('deliv', { name: 'Deliv B' });
+    expect(res.status).toBe(200);
+
+    const after = store.deliverablesDir('deliv');
+    expect(after).toBe(before);
+    expect(existsSync(join(after, 'report.md'))).toBe(true);
+    // The pointer is written next to the bot, so a restart does not recompute it from the name.
+    expect(readFileSync(join(root, 'bots', 'deliv', 'bot.yaml'), 'utf-8')).toContain('deliverablesFolder: Deliv A');
+  });
+});
+
+describe('web bots API — the conversation register', () => {
+  const post = (path: string, body: unknown) =>
+    app.request(path, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
+
+  const onboard = (id: string) => post('/api/bots', { id, name: id, tier: 'builder' });
+
+  it("accepts a message in the owner's conversation with the chat trigger", async () => {
+    await onboard('talker');
+    const enqueued: Array<Record<string, unknown>> = [];
+    const real = manager.enqueue.bind(manager);
+    manager.enqueue = ((botId: string, job: never) => {
+      enqueued.push({ botId, ...(job as object) });
+      return real(botId, job);
+    }) as never;
+
+    const res = await post('/api/bots/talker/chat', { message: 'et le graphe ?' });
+    expect(res.status).toBe(202);
+    const body = await jreq(res);
+    expect(body).toMatchObject({ accepted: true, status: 'accepted' });
+    expect(typeof body.jobId).toBe('string');
+    // The register is carried by the trigger: `chat` asks for an answer, where `api` asks for work
+    // and reads "Nothing to do" as a failed run.
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]).toMatchObject({ botId: 'talker', trigger: 'chat', prompt: 'et le graphe ?', mode: 'chat' });
+  });
+
+  it('refuses a message with no text', async () => {
+    await onboard('talker');
+    expect((await post('/api/bots/talker/chat', {})).status).toBe(400);
+  });
+
+  it('answers 409 with the reason when the bot cannot take the turn', async () => {
+    const res = await post('/api/bots/ghost/chat', { message: 'coucou' });
+    expect(res.status).toBe(409);
+    expect(await jreq(res)).toMatchObject({ accepted: false, reasonCode: 'target_unknown' });
   });
 });

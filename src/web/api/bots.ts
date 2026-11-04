@@ -147,8 +147,8 @@ const rosterSseClients = new Set<{ send: (event: string, data: unknown) => void 
 /**
  * Subscribes a client to the fleet feed, and returns its unsubscribe.
  *
- * Exported so a test can stand where a browser tab stands: the point of the broadcast below is that
- * *someone else's* screen updates, which no assertion on the PATCH response can show.
+ * Exported so a test can stand where a browser tab stands: the point of a broadcast is that
+ * *someone else's* screen updates, which no assertion on a PATCH reply can show.
  */
 export function registerRosterClient(client: { send: (event: string, data: unknown) => void }): () => void {
   rosterSseClients.add(client);
@@ -341,7 +341,14 @@ app.patch('/api/bots/:id', async (c: any) => {
 });
 
 // Message a bot (durable enqueue; returns the job id immediately)
-app.post('/api/bots/:id/message', async (c: any) => {
+/**
+ * A message in the owner's conversation with a bot.
+ *
+ * Same queue and the same activity stream as `message`, but the turn runs in chat mode: the
+ * bot answers the question instead of filing a work report (which, for a question that needs
+ * no tool, would be "Nothing to do").
+ */
+app.post('/api/bots/:id/chat', async (c: any) => {
   if (!botManager) return c.json({ error: 'Bots not available' }, 400);
   const id = c.req.param('id');
   const body = await c.req.json().catch(() => null) as
@@ -359,8 +366,50 @@ app.post('/api/bots/:id/message', async (c: any) => {
   }
 
   const result = botManager.enqueue(id, {
-    trigger: 'api',
+    // The trigger says where the turn came from (`chat`: the owner, talking), `mode` says how it
+    // is judged (`chat`: an answer, where `work` wants a delivery and counts "Nothing to do" as a
+    // run with no outcome).
+    trigger: 'chat',
     prompt: message,
+    fromBot: body?.from,
+    mode: 'chat',
+    attachments: upload.attachments.length > 0 ? upload.attachments : undefined,
+  });
+  if (!result.accepted) {
+    // The turn will never run: its files must not stay in uploads.
+    for (const a of upload.attachments) rmSync(a.path, { force: true });
+    return c.json({ accepted: false, reasonCode: result.reasonCode }, 409);
+  }
+  return c.json({
+    accepted: true,
+    jobId: result.jobId,
+    status: 'accepted',
+    ...(upload.attachments.length > 0 ? { attachments: upload.attachments.map(a => ({ name: a.name, kind: a.kind })) } : {}),
+  }, 202);
+});
+
+app.post('/api/bots/:id/message', async (c: any) => {
+  if (!botManager) return c.json({ error: 'Bots not available' }, 400);
+  const id = c.req.param('id');
+  const body = await c.req.json().catch(() => null) as {
+    message?: string;
+    from?: string;
+    /** Base64 photos and PDFs: a bot can be shown a screenshot, not only told about one. */
+    attachments?: unknown;
+  } | null;
+  // Bytes on the wire, written before the job exists: the queue stores paths, and a
+  // bot turn reads them exactly like a channel attachment.
+  const upload = storeInlineAttachments(body?.attachments);
+  if (!upload.ok) return c.json({ error: upload.error }, 400);
+  const message = body?.message?.trim() ?? '';
+  if (!message && upload.attachments.length === 0) {
+    return c.json({ error: 'message is required' }, 400);
+  }
+  // A photo sent without words still says what it is — models reject an empty text block.
+  const prompt = message || `(Attached: ${upload.attachments.map(a => a.name).join(', ')})`;
+  const result = botManager.enqueue(id, {
+    trigger: 'api',
+    prompt,
     fromBot: body?.from,
     attachments: upload.attachments.length > 0 ? upload.attachments : undefined,
   });
@@ -377,8 +426,27 @@ app.post('/api/bots/:id/message', async (c: any) => {
     accepted: true,
     jobId: result.jobId,
     status: 'accepted',
-    ...(upload.attachments.length > 0 ? { attachments: upload.attachments.map(a => ({ name: a.name, kind: a.kind })) } : {}),
+    ...(upload.attachments.length > 0
+      ? { attachments: upload.attachments.map(a => ({ name: a.name, kind: a.kind })) }
+      : {}),
   }, 202);
+});
+
+// A message in the owner's conversation with a bot — the *talk* register, not the task one.
+// The two differ by what the turn is judged on: `api` expects work and treats "Nothing to do"
+// as a failed run, `chat` expects an answer and asks for nothing else. The app has always had
+// both registers (`POST /api/bots/:id/message` and `/chat`); this route is the half the daemon
+// was missing, so writing to a bot from its conversation used to end in a 404.
+app.post('/api/bots/:id/chat', async (c: any) => {
+  if (!botManager) return c.json({ error: 'Bots not available' }, 400);
+  const id = c.req.param('id');
+  const body = await c.req.json().catch(() => null) as { message?: string; from?: string } | null;
+  if (!body?.message) return c.json({ error: 'message is required' }, 400);
+  const result = botManager.enqueue(id, { trigger: 'chat', prompt: body.message, fromBot: body.from });
+  if (!result.accepted) {
+    return c.json({ accepted: false, reasonCode: result.reasonCode }, 409);
+  }
+  return c.json({ accepted: true, jobId: result.jobId, status: 'accepted' }, 202);
 });
 
 // Inbox (pending bot-to-bot mail)
@@ -516,6 +584,30 @@ app.post('/api/bots/:id/crew', async (c: any) => {
     botManager.store.writePermissions(result.manifest.id, tierPermissionsFile(body.tier as PermissionTier));
   }
   return c.json({ bot: result.manifest }, 201);
+});
+
+/**
+ * Attach an existing bot to a fleet: `{ memberId }`.
+ *
+ * The roster's "add a member" sheet lists the solo bots this lead can take, and this is what
+ * that list calls. Same validations as creation (lead, cap, depth, not already in a fleet).
+ */
+app.post('/api/bots/:id/crew/adopt', async (c: any) => {
+  if (!botManager) return c.json({ error: 'Bots not available' }, 400);
+  const leadId = c.req.param('id');
+  const body = await c.req.json().catch(() => null) as { memberId?: string } | null;
+  if (!body?.memberId) return c.json({ error: 'memberId is required' }, 400);
+  const result = botManager.adoptCrew(leadId, body.memberId);
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return c.json({ bot: result.manifest });
+});
+
+/** Take a member out of a fleet: the bot becomes solo again. */
+app.post('/api/bots/:id/crew/:memberId/detach', (c: any) => {
+  if (!botManager) return c.json({ error: 'Bots not available' }, 400);
+  const result = botManager.detachCrew(c.req.param('id'), c.req.param('memberId'));
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return c.json({ bot: result.manifest });
 });
 
 // Persona (character file) — read + write

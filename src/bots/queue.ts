@@ -20,6 +20,12 @@ export interface DurableBotJob {
    */
   attachments?: ChannelAttachment[];
   source?: { channelType: string; channelId: string };
+  /**
+   * 'work' (default) is a delivery run judged by what it changed. 'chat' is the owner
+   * talking to the bot in the app: the answer itself is the point, so the turn must reply
+   * instead of reporting "Nothing to do".
+   */
+  mode?: 'work' | 'chat';
   state: 'pending' | 'claimed' | 'dead';
   attempts: number;
   createdAt: number;
@@ -98,8 +104,7 @@ const DLQ_CAP = 100;
 /**
  * Two requests that differ only by their files are different jobs: the same caption
  * ("what is this?") with two different photos must not collapse into one. Files are keyed
- * by their bytes, not their path: every upload gets a fresh random name, so a path would
- * never let a retried request dedupe.
+ * by their bytes, not their path — see `fileFingerprint`.
  */
 /** A file's content hash, or its path when it can't be read (the turn will skip it anyway). */
 function fileFingerprint(attachment: ChannelAttachment): string {

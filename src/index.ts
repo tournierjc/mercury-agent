@@ -98,7 +98,7 @@ import { selectWithArrowKeys } from './utils/arrow-select.js';
 import { ProviderModelFetchError, fetchProviderModelCatalog } from './utils/provider-models.js';
 import { initCloudTokenStore } from './cloud/token-store.js';
 import { clearCloudRuntimeOnline, markCloudRuntimeOnline } from './cloud/runtime-status.js';
-import { startWebServer, stopWebServer, updateStatus as updateWebStatus, setUserMemory as setWebUserMemory, setWebChannel as setWebWebChannel, setScheduler as setWebScheduler, setAgentSupervisor as setWebSupervisor, setBackgroundTaskManager as setWebBgTasks, setSpotifyClient as setWebSpotify, setProgrammingMode as setWebProgrammingMode, setModelSwitchCallback as setWebModelSwitch, setCurrentProviderCallback as setWebCurrentProvider, setStatusSnapshotCallback as setWebStatusSnapshot, setKanbanSupervisor as setWebKanban, setKanbanBoardManager as setWebBoardManager, setKanbanProviders as setWebKanbanProviders, setIDEProviders as setWebIDEProviders, setSessionRepository as setWebSessions, setSessionSyncEnabledCallback as setWebSessionSyncEnabled, setBotManager as setWebBotManager, setBotsWebhookSecret, setShutdownHandler, setMcpManager as setWebMcpManager, setStopCallback as setWebStop, setSessionBusyLookup as setWebSessionBusy, setQueueControls as setWebQueueControls, setResearchControls as setWebResearchControls, setBudgetControls as setWebBudgetControls } from './web/server.js';
+import { startWebServer, stopWebServer, updateStatus as updateWebStatus, setUserMemory as setWebUserMemory, setWebChannel as setWebWebChannel, setScheduler as setWebScheduler, setAgentSupervisor as setWebSupervisor, setBackgroundTaskManager as setWebBgTasks, setSpotifyClient as setWebSpotify, setProgrammingMode as setWebProgrammingMode, setModelSwitchCallback as setWebModelSwitch, setCurrentProviderCallback as setWebCurrentProvider, setStatusSnapshotCallback as setWebStatusSnapshot, setKanbanSupervisor as setWebKanban, setKanbanBoardManager as setWebBoardManager, setKanbanProviders as setWebKanbanProviders, setIDEProviders as setWebIDEProviders, setSessionRepository as setWebSessions, setSessionSyncEnabledCallback as setWebSessionSyncEnabled, setBotManager as setWebBotManager, setSandboxTools, setBotsWebhookSecret, setShutdownHandler, setMcpManager as setWebMcpManager, setStopCallback as setWebStop, setSessionBusyLookup as setWebSessionBusy, setQueueControls as setWebQueueControls, setResearchControls as setWebResearchControls, setBudgetControls as setWebBudgetControls } from './web/server.js';
 import { validateApiKey, validateBaseUrl, validateModelName } from './providers/provider-meta.js';
 import { setFirstProviderHandler, setProvidersReload } from './web/api/providers.js';
 import { setCloudReload } from './web/api/cloud.js';
@@ -109,6 +109,7 @@ import { setSkillBuilder } from './web/api/system.js';
 import { setArtifactOutputDir, setArtifactSessions } from './web/api/artifacts.js';
 import { artifactStore } from './artifacts/store.js';
 import { isWebAuthInitialized, setWebPassword, writeAttachToken, initWebAuth } from './web/auth.js';
+import { SandboxTools, toolsPath } from './sandbox/tools.js';
 import { startLoopLagMonitor } from './utils/loop-lag.js';
 import { McpManager, probeMcpServer, validateMcpConfig, type McpServerStatus } from './capabilities/mcp/index.js';
 import {
@@ -201,6 +202,7 @@ const PROVIDER_OPTIONS: Array<{ key: ProviderName; label: string }> = [
   { key: 'aimlapi', label: 'AI/ML API (350+ models on one key)' },
   { key: 'deepseek', label: 'DeepSeek' },
   { key: 'openai', label: 'OpenAI' },
+  { key: 'openrouter', label: 'OpenRouter (one key, every vendor)' },
   { key: 'anthropic', label: 'Anthropic' },
   { key: 'githubCopilot', label: 'GitHub Copilot' },
   { key: 'grok', label: 'Grok (xAI)' },
@@ -2771,6 +2773,18 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
     pluginManager.setRunsPlugins(true);
     pluginManager.setNotifier((m) => agent.notifyAllChannels(m));
     void pluginManager.boot().catch((err) => logger.error({ err }, 'Plugin boot failed'));
+  }
+
+  // Tools installed from the phone land in ~/.mercury/tools/bin (the mounted volume, so they
+  // survive a container upgrade). Putting that directory on the daemon's PATH is what makes a bot's
+  // `run_command` find them: there is no per-bot process to configure. Registered before the fleet,
+  // so the screen answers even when bots are disabled.
+  {
+    const dir = toolsPath();
+    if (!process.env.PATH?.split(':').includes(dir)) {
+      process.env.PATH = `${dir}:${process.env.PATH ?? ''}`;
+    }
+    setSandboxTools(new SandboxTools());
   }
 
   // Mercury Bots: fleet manager runs outside the main message queue.

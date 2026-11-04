@@ -55,6 +55,25 @@ export function versionString(): string {
       || JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'package.json'), 'utf8')).version
       || '';
   } catch { runtimeVersion = ''; }
+  const fromEnv = process.env.MERCURY_CHANNEL_VERSION;
+  if (fromEnv) {
+    runtimeVersion = fromEnv;
+    return runtimeVersion;
+  }
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let depth = 0; depth < 4; depth += 1) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { version?: string };
+      if (pkg?.version) {
+        runtimeVersion = pkg.version;
+        return runtimeVersion;
+      }
+    } catch { /* not here: keep walking up */ }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  runtimeVersion = '';
   return runtimeVersion;
 }
 

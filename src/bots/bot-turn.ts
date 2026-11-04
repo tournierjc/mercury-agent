@@ -8,6 +8,7 @@ import type { CapabilityRegistry } from '../capabilities/registry.js';
 import type { UserMemoryStore } from '../memory/user-memory.js';
 import type { TokenBudget } from '../utils/tokens.js';
 import type { BaseProvider } from '../providers/base.js';
+
 import { classifyStreamCompletion } from '../core/stream-completion.js';
 import { stepsExhaustedPrompt } from '../core/completion-verdict.js';
 import { isFailedToolResult } from '../core/execute-guard.js';
@@ -15,8 +16,27 @@ import { MAX_AUTOMATIC_CONTINUATIONS } from '../core/execution-limits.js';
 import { formatToolStep } from '../utils/tool-label.js';
 import { logger } from '../utils/logger.js';
 import type { BotManifest, BotTrigger } from './types.js';
+import { getDefaultConfig } from '../utils/config.js';
+
 
 /** Mailbox messages injected mid-turn (bot-to-bot or queued user input). */
+/**
+ * One step's thinking, as the model emitted it.
+ *
+ * Reasoning used to be consumed and dropped: only a rolling tail of it reached the live feed, so a
+ * run explained after the fact showed what the bot did and never what it weighed. Kept per step and
+ * bounded (a run that thinks for twenty steps must not turn its transcript into a novel).
+ */
+export interface BotReasoningBlock {
+  step: number;
+  text: string;
+}
+
+/** Thinking kept per run, newest first when it does not fit. */
+const MAX_REASONING_CHARS = 24_000;
+/** Thinking kept for one step. */
+const MAX_REASONING_BLOCK_CHARS = 8_000;
+
 export interface BotTurnMail {
   from: string;
   content: string;
@@ -99,6 +119,14 @@ export const DEFAULT_TURN_LIMITS: BotTurnLimits = {
 export interface BotTurnInput {
   manifest: BotManifest;
   trigger: BotTrigger;
+  /**
+   * 'work' (default): a delivery run, judged by what it changed — the rules below forbid
+   * narrating and tell the bot to answer "Nothing to do" when nothing needed doing.
+   * 'chat': the owner is talking to the bot in the app. The answer is the deliverable, so
+   * those rules would make it reply "Nothing to do" to a question — the one thing a
+   * conversation cannot do.
+   */
+  mode?: 'work' | 'chat';
   /** Durable job id — correlates activity events with the run. */
   jobId?: string;
   prompt: string;
@@ -115,7 +143,10 @@ export interface BotTurnInput {
    * a caption-less photo becomes `(Attached: names)` because a provider rejects an
    * empty text block, and a model without vision gets a note instead of pixels.
    */
+  /** Photos and PDFs handed to this turn; absent for every unattended wake. */
   attachments?: ChannelAttachment[];
+  /** The owner's declaration about this model's vision, when there is one. */
+  visionDeclared?: boolean;
   persona: string;
   /** Pending mailbox messages at turn start (attributed bot-to-bot handoffs). */
   mail: BotTurnMail[];
@@ -186,6 +217,16 @@ export interface BotTurnOutput {
   /** The no-outcome nudge was issued (once per turn). */
   outcomeNudged: boolean;
   trace: BotToolTraceEntry[];
+  /**
+   * The thinking the turn recorded, step by step.
+   *
+   * Filled from the provider stream's `reasoning-delta` parts — so an endpoint
+   * reached through a client that drops them records an empty list. `transport:
+   * compatible` is what makes them arrive for a compatible server.
+   */
+  reasoning: BotReasoningBlock[];
+  /** True when the oldest blocks were dropped to stay inside the transcript's cap. */
+  reasoningTruncated: boolean;
 }
 
 const MAX_STEPS_DEFAULT = 25;
@@ -286,7 +327,13 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
       timestamp: Date.now(),
       metadata: { attachments: files },
     } as never;
-    const withFiles = withAttachments(messages, turnMessage, provider.name, provider.getModel(), provider.seesImages);
+    // A REAL provider exposes `seesImages` from its own config; a port built by hand may not.
+    // Whoever is left without a declaration asks the config for this endpoint's, which is where the
+    // owner's `*_VISION` lands — otherwise a declared self-hosted vision model is told it cannot see.
+    const declaredVision = (provider as { seesImages?: boolean }).seesImages
+      ?? input.visionDeclared
+      ?? (getDefaultConfig().providers as unknown as Record<string, { vision?: boolean } | undefined>)[provider.name]?.vision;
+    const withFiles = withAttachments(messages, turnMessage, provider.name, provider.getModel(), declaredVision);
     messages.splice(0, messages.length, ...withFiles);
   }
 
@@ -346,9 +393,31 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
     ...runReportTools((r) => { report = r; }),
   };
 
+  // Thinking, per step, bounded. Closing a block is the only place that trims, so the common case
+  // (a turn within budget) copies nothing.
+  const reasoning: BotReasoningBlock[] = [];
+  let reasoningTruncated = false;
+  let stepReasoning = '';
+  const closeReasoning = (): void => {
+    const text = stepReasoning.trim();
+    stepReasoning = '';
+    if (!text) return;
+    reasoning.push({
+      step: stepIndex,
+      text: text.length > MAX_REASONING_BLOCK_CHARS ? text.slice(0, MAX_REASONING_BLOCK_CHARS) : text,
+    });
+    let total = reasoning.reduce((sum, block) => sum + block.text.length, 0);
+    while (total > MAX_REASONING_CHARS && reasoning.length > 1) {
+      total -= reasoning[0].text.length;
+      reasoning.shift();
+      reasoningTruncated = true;
+    }
+  };
+
   const baseOutput = () => ({
     tokensIn, tokensOut, toolsUsed: [...toolsUsed], startedAt, steps: stepIndex, toolCalls: trace.length,
     peakInputTokens, deliverables: [...deliveries], outcomeNudged, trace: [...trace], ...(report ? { report } : {}),
+    reasoning: [...reasoning], reasoningTruncated,
   });
   const outcomeNow = (text: string): BotOutcome => computeOutcome({ trace, deliveries, expects, text, sandbox: input.sandbox, report });
 
@@ -433,12 +502,17 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
       };
       for await (const part of stream.fullStream) {
         if (part.type === 'reasoning-delta' && part.text) {
+          stepReasoning += part.text;
           reasoningTail = (reasoningTail + part.text).slice(-THINKING_TAIL_CHARS);
         } else if (part.type === 'text-delta' && part.text) {
           textTail = (textTail + part.text).slice(-THINKING_TAIL_CHARS);
-        } else if (part.type === 'start-step' && (reasoningTail || textTail)) {
-          reasoningTail += '\n\n';
-          textTail += '\n\n';
+        } else if (part.type === 'start-step') {
+          // A new step thinks anew; the previous step's thinking is closed and kept.
+          closeReasoning();
+          if (reasoningTail || textTail) {
+            reasoningTail += '\n\n';
+            textTail += '\n\n';
+          }
         } else if (part.type === 'error') {
           // The provider's real error. Without this, `stream.text` below
           // throws the generic "No output generated" and the journal never
@@ -448,6 +522,7 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
         if (Date.now() - lastEmit >= THINKING_EMIT_INTERVAL_MS) flushThinking();
       }
       flushThinking();
+      closeReasoning();
 
       let result: { text: string; finishReason: unknown };
       try {
@@ -570,6 +645,19 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
       return governedFailure(governorReason, lastResult?.text, limits, baseOutput(), input, trace, deliveries, expects, emit, stepIndex);
     }
     const message = err instanceof Error ? err.message : String(err);
+    // A provider that answers HTTP 200 with a body the SDK cannot parse says nothing about *why*:
+    // `Failed to process successful response` is all the owner sees, and the body that would explain
+    // it is dropped with the error. Keep it (redacted by the logger's serializers) for the post-mortem.
+    const providerError = err as { statusCode?: number; url?: string; responseBody?: string; cause?: unknown };
+    logger.error({
+      botId: input.manifest.id,
+      stepIndex,
+      statusCode: providerError?.statusCode,
+      url: providerError?.url,
+      errorMessage: message,
+      responseBody: typeof providerError?.responseBody === 'string' ? providerError.responseBody.slice(0, 8000) : undefined,
+      cause: providerError?.cause instanceof Error ? providerError.cause.message : undefined,
+    }, 'Bot turn failed');
     emit({ kind: 'turn-end', stepIndex, label: `failed: ${message.slice(0, 80)}`, status: 'error' });
     return {
       status: 'failed',
@@ -643,9 +731,32 @@ export function resolveTurnLimits(manifest: BotManifest, overrides?: Partial<Bot
   };
 }
 
+/**
+ * The text a failure is classified on: the message, and what the error wraps.
+ *
+ * The AI SDK reports a cut stream as « Failed to process successful response » and keeps the real
+ * reason in `cause` — an ECONNRESET, a body cut mid-read, a JSON parse error. Reading only the
+ * message sent every one of those to unknown_error: no retry, DLQ, needs-you. A network blip then
+ * looked like a permanent fault, and the owner was told a bot had failed when it had merely lost
+ * its socket.
+ */
+function failureText(err: unknown): string {
+  const parts: string[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  for (let depth = 0; current != null && depth < 5 && !seen.has(current); depth++) {
+    seen.add(current);
+    const wrapped = current as { message?: unknown; code?: unknown; cause?: unknown };
+    if (typeof wrapped.message === 'string') parts.push(wrapped.message);
+    if (typeof wrapped.code === 'string') parts.push(wrapped.code);
+    current = wrapped.cause;
+  }
+  return parts.join(' | ').toLowerCase();
+}
+
 /** Map a provider/tool error to a typed reason code (retry vs permanent). */
 export function classifyFailure(err: unknown): string {
-  let msg = String((err as { message?: unknown })?.message ?? err ?? '').toLowerCase();
+  let msg = failureText(err);
   // Retry wrappers ("Failed after 3 attempts. Last error: …") carry the
   // real cause after the colon — classify that, not the wrapper.
   const inner = /last error:\s*(.+)$/s.exec(msg);
@@ -662,6 +773,10 @@ export function classifyFailure(err: unknown): string {
   // The SDK's "No output generated" means the stream ended before any step:
   // a provider hiccup, not a permanent condition.
   if (/no output generated/.test(msg)) return 'provider_empty';
+  // The SDK's wrapper around a 2xx response it could not read or parse. Nothing
+  // permanent lives there — a cut stream, a truncated body, an HTML page — and the
+  // cause above already claimed the network cases; whatever is left is still a retry.
+  if (/failed to process successful response/.test(msg)) return 'provider_empty';
   if (/no llm providers available/.test(msg)) return 'provider_unavailable';
   if (/permission denied|blocked command|no permission/.test(msg)) return 'permission_denied';
   if (/api key|unauthorized|401|authentication/.test(msg)) return 'provider_auth';

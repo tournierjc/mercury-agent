@@ -43,6 +43,36 @@ export interface ProviderConfig {
    * local Qwen-VL called `qwen3.8-flash-next` was refused for that reason.
    */
   vision?: boolean;
+  /**
+   * Which client speaks to this endpoint.
+   *
+   * `openai` (the default) uses OpenAI's own client, which reads the `reasoning`
+   * field of OpenAI's API and drops the `reasoning_content` a compatible server
+   * sends. `compatible` uses the OpenAI-compatible client, the only one that turns
+   * it into stream parts. Both the agent and the bot turn record thinking from
+   * those parts, so with `openai` a self-hosted model's thinking is counted,
+   * billed, and thrown away.
+   *
+   * Opt-in per endpoint on purpose: the two clients also differ in how they place
+   * tool calls and multi-part messages, so a provider is moved only after being
+   * tried.
+   */
+  transport?: ProviderTransport;
+  /** OpenRouter only: pin one endpoint of the model (see ProviderRouting). */
+  routing?: ProviderRouting;
+}
+
+/** The two clients an OpenAI-shaped endpoint can be reached through. */
+export type ProviderTransport = 'openai' | 'compatible';
+
+/** OpenRouter's endpoint pin: which hosts serve the model, in which quantization. */
+export interface ProviderRouting {
+  /** Provider slugs to try, in order (OpenRouter's `provider.order`). */
+  order?: string[];
+  /** Quantizations to accept, e.g. ['fp8']. */
+  quantizations?: string[];
+  /** When a pin is set, fall back to other hosts if it is down. Default: false. */
+  allowFallbacks?: boolean;
 }
 
 export interface TelegramAccessUser {
@@ -67,6 +97,7 @@ export type ProviderName =
   | 'mercuryCloud'
   | 'aimlapi'
   | 'openai'
+  | 'openrouter'
   | 'anthropic'
   | 'deepseek'
   | 'grok'
@@ -112,6 +143,7 @@ export interface MercuryConfig {
     aimlapi: ProviderConfig;
     mercuryCloud: ProviderConfig;
     openai: ProviderConfig;
+    openrouter: ProviderConfig;
     anthropic: ProviderConfig;
     deepseek: ProviderConfig;
     grok: ProviderConfig;
@@ -151,6 +183,19 @@ export interface MercuryConfig {
       admins: SignalAccessUser[];
       members: SignalAccessUser[];
       pending: SignalPendingRequest[];
+    };
+    /**
+     * A one-way push channel (ADR-030): alerts are published to an ntfy topic, which the
+     * phone shows as a notification. Not a chat — nothing inbound is read.
+     */
+    ntfy: {
+      enabled: boolean;
+      url: string;
+      topic: string;
+      token?: string;
+      /** ntfy accepts 1-5 or min/low/default/high/urgent. */
+      priority: string;
+      tags: string;
     };
     discord: {
       enabled: boolean;
@@ -316,6 +361,27 @@ function getEnvNum(key: string, fallback: number): number {
   return val ? parseInt(val, 10) : fallback;
 }
 
+/**
+ * `transport: compatible` in the environment, or `undefined` for the default
+ * (`openai`). An unrecognised value is refused here rather than silently ignored:
+ * a typo in `OPENAI_COMPAT_TRANSPORT=compat` would otherwise look like the
+ * endpoint simply has no thinking to give.
+ */
+/** A comma-separated env var as a list, trimmed, with the blanks dropped. */
+function listFromEnv(key: string): string[] {
+  return (process.env[key] ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function getEnvTransport(name: string): ProviderTransport | undefined {
+  const raw = getEnv(name, '').trim().toLowerCase();
+  if (raw === '') return undefined;
+  if (raw === 'openai' || raw === 'compatible') return raw;
+  throw new Error(`${name}="${raw}" — expected "openai" or "compatible"`);
+}
+
 function getEnvBool(key: string, fallback: boolean): boolean {
   const val = process.env[key]?.toLowerCase();
   if (val === 'true') return true;
@@ -383,6 +449,28 @@ export function getDefaultConfig(): MercuryConfig {
         model: getEnv('OPENAI_MODEL', 'gpt-4o-mini'),
         enabled: getEnvBool('OPENAI_ENABLED', true),
       },
+      // OpenRouter is an OpenAI-compatible gateway over one key: the base URL is the whole
+      // difference, so it rides the same client as the other compat providers.
+      openrouter: {
+        name: 'openrouter',
+        apiKey: getEnv('OPENROUTER_API_KEY', ''),
+        baseUrl: getEnv('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1'),
+        model: getEnv('OPENROUTER_MODEL', ''),
+        enabled: getEnvBool('OPENROUTER_ENABLED', false),
+        // Left absent, not empty, when unset: the request then carries no
+        // routing block at all and the gateway picks the endpoint itself.
+        ...(() => {
+          const order = listFromEnv('OPENROUTER_PROVIDER');
+          const quantizations = listFromEnv('OPENROUTER_QUANTIZATIONS');
+          const routing = {
+            ...(order.length > 0 ? { order } : {}),
+            ...(quantizations.length > 0 ? { quantizations } : {}),
+            ...(order.length > 0 ? { allowFallbacks: false } : {}),
+          };
+          return Object.keys(routing).length > 0 ? { routing } : {};
+        })(),
+        vision: getEnvOptionalBool('OPENROUTER_VISION'),
+      },
       anthropic: {
         name: 'anthropic',
         apiKey: getEnv('ANTHROPIC_API_KEY', ''),
@@ -411,6 +499,7 @@ export function getDefaultConfig(): MercuryConfig {
         baseUrl: getEnv('ATLASCLOUD_BASE_URL', 'https://api.atlascloud.ai/v1'),
         model: getEnv('ATLASCLOUD_MODEL', 'qwen/qwen3.5-flash'),
         enabled: getEnvBool('ATLASCLOUD_ENABLED', true),
+        transport: getEnvTransport('ATLASCLOUD_TRANSPORT'),
       },
       runcrate: {
         name: 'runcrate',
@@ -425,6 +514,7 @@ export function getDefaultConfig(): MercuryConfig {
         baseUrl: getEnv('OLLAMA_CLOUD_BASE_URL', 'https://ollama.com/v1'),
         model: getEnv('OLLAMA_CLOUD_MODEL', 'gpt-oss:120b'),
         enabled: getEnvBool('OLLAMA_CLOUD_ENABLED', true),
+        transport: getEnvTransport('OLLAMA_CLOUD_TRANSPORT'),
       },
       ollamaLocal: {
         name: 'ollamaLocal',
@@ -432,6 +522,7 @@ export function getDefaultConfig(): MercuryConfig {
         baseUrl: getEnv('OLLAMA_LOCAL_BASE_URL', 'http://127.0.0.1:11434/v1'),
         model: getEnv('OLLAMA_LOCAL_MODEL', ''),
         enabled: getEnvBool('OLLAMA_LOCAL_ENABLED', false),
+        transport: getEnvTransport('OLLAMA_LOCAL_TRANSPORT'),
       },
       atomicChat: {
         name: 'atomicChat',
@@ -439,6 +530,7 @@ export function getDefaultConfig(): MercuryConfig {
         baseUrl: getEnv('ATOMIC_CHAT_BASE_URL', 'http://127.0.0.1:1337/v1'),
         model: getEnv('ATOMIC_CHAT_MODEL', ''),
         enabled: getEnvBool('ATOMIC_CHAT_ENABLED', false),
+        transport: getEnvTransport('ATOMIC_CHAT_TRANSPORT'),
       },
       openaiCompat: {
         name: 'openaiCompat',
@@ -447,6 +539,7 @@ export function getDefaultConfig(): MercuryConfig {
         model: getEnv('OPENAI_COMPAT_MODEL', ''),
         enabled: getEnvBool('OPENAI_COMPAT_ENABLED', false),
         vision: getEnvOptionalBool('OPENAI_COMPAT_VISION'),
+        transport: getEnvTransport('OPENAI_COMPAT_TRANSPORT'),
       },
       mimo: {
         name: 'mimo',
@@ -469,6 +562,7 @@ export function getDefaultConfig(): MercuryConfig {
         baseUrl: getEnv('LM_STUDIO_BASE_URL', 'http://127.0.0.1:1234/v1'),
         model: getEnv('LM_STUDIO_MODEL', ''),
         enabled: getEnvBool('LM_STUDIO_ENABLED', false),
+        transport: getEnvTransport('LM_STUDIO_TRANSPORT'),
       },
       chatgptWeb: {
         name: 'chatgptWeb',
@@ -491,6 +585,7 @@ export function getDefaultConfig(): MercuryConfig {
         model: getEnv('LITELLM_MODEL', 'gpt-4o-mini'),
         enabled: getEnvBool('LITELLM_ENABLED', false),
         vision: getEnvOptionalBool('LITELLM_VISION'),
+        transport: getEnvTransport('LITELLM_TRANSPORT'),
       },
     },
     channels: {
@@ -516,6 +611,14 @@ export function getDefaultConfig(): MercuryConfig {
         admins: [],
         members: [],
         pending: [],
+      },
+      ntfy: {
+        enabled: getEnvBool('NTFY_ENABLED', false),
+        url: getEnv('NTFY_URL', 'https://ntfy.sh'),
+        topic: getEnv('NTFY_TOPIC', ''),
+        token: getEnv('NTFY_TOKEN', ''),
+        priority: getEnv('NTFY_PRIORITY', 'high'),
+        tags: getEnv('NTFY_TAGS', 'warning'),
       },
       discord: {
         enabled: getEnvBool('DISCORD_ENABLED', false),
