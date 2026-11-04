@@ -191,6 +191,12 @@ export async function authGuard(c: Context, next: Next) {
     if (!SAFE_METHODS.has(c.req.method) && path === '/api/auth/login' && crossSite(c)) return c.text('Forbidden', 403);
     return next();
   }
+  // A plugin renderer's asset loads inside an iframe with `sandbox`, where Chrome
+  // sends no cookie and the session check could never pass. The asset is shipped
+  // code served with a CSP that allows nothing; the listing above stays authenticated.
+  if (path.startsWith('/api/ui/renderers/') && path !== '/api/ui/renderers/') {
+    return next();
+  }
   if (api) {
     const principal = authenticateRequest(c);
     if (!principal) {

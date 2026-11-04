@@ -97,9 +97,21 @@ const MIMO_PREFERRED_MODELS = [
 const MIMO_TOKEN_PLAN_PREFERRED_MODELS = MIMO_PREFERRED_MODELS;
 
 const OPENAI_COMPAT_PREFERRED_MODELS = [] as const;
-// Même raison qu'openaiCompat : nous ne gardons pas une liste de modèles OpenRouter, elle
-// change toutes les semaines ; le sélecteur apprend le catalogue depuis /models.
-const OPENROUTER_PREFERRED_MODELS = [] as const;
+/**
+ * OpenRouter serves the same weights under namespaced ids and 404s on a bare
+ * `claude-sonnet-4.6`, so the picker seeds with lab-prefixed ids; the rest
+ * comes from `/models` at test time.
+ */
+const OPENROUTER_PREFERRED_MODELS = [
+  'anthropic/claude-sonnet-4.6',
+  'anthropic/claude-haiku-4.5',
+  'openai/gpt-5.1',
+  'openai/gpt-5.1-mini',
+  'google/gemini-3-pro',
+  'deepseek/deepseek-v3.2',
+  'qwen/qwen3.5-235b-a22b',
+  'mistralai/mistral-large-2',
+] as const;
 const LM_STUDIO_PREFERRED_MODELS = [] as const;
 const ATOMIC_CHAT_PREFERRED_MODELS = [] as const;
 

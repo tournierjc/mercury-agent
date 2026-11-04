@@ -70,7 +70,11 @@ describe('provider endpoint routing', () => {
     });
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ success: true, restartRequired: true });
+    const body = await res.json() as { success: boolean; restartRequired: boolean; provider?: { routing?: unknown } };
+    expect(body.success).toBe(true);
+    expect(body.restartRequired).toBe(true);
+    // Upstream's save route echoes the whole row; only the pin is under test.
+    expect(body.provider?.routing).toEqual({ order: ['inference-net'], quantizations: ['fp8'] });
 
     const entry = (await list()).find((p) => p.name === 'openrouter');
     expect(entry?.routing).toEqual({ order: ['inference-net'], quantizations: ['fp8'] });

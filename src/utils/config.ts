@@ -944,6 +944,11 @@ export function isProviderConfigured(provider: ProviderConfig): boolean {
   if (provider.name === 'atlascloud' || provider.name === 'runcrate') {
     return provider.apiKey.length > 0 && provider.baseUrl.length > 0 && provider.model.length > 0;
   }
+  if (provider.name === 'openrouter') {
+    // A hosted gateway: keyless, it would answer 401 on every turn and read as
+    // a Mercury bug rather than a missing setting.
+    return provider.apiKey.length > 0 && provider.baseUrl.length > 0 && provider.model.length > 0;
+  }
   if (provider.name === 'openaiCompat' || provider.name === 'litellm') {
     return provider.baseUrl.length > 0 && provider.model.length > 0;
   }

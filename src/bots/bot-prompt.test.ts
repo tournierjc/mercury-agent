@@ -9,6 +9,11 @@ import { buildBotSystemPrompt, type BotTurnInput } from './bot-turn.js';
  * that produces the refusal.
  */
 
+/** Upstream split the prompt for cache reuse; these tests read the whole thing. */
+function joinPrompt(p: { stable: string; volatile: string }): string {
+  return p.stable + p.volatile;
+}
+
 function input(overrides: Partial<BotTurnInput> = {}): BotTurnInput {
   return {
     manifest: {
@@ -35,14 +40,14 @@ function input(overrides: Partial<BotTurnInput> = {}): BotTurnInput {
 
 describe('bot system prompt', () => {
   it('a work turn keeps the delivery rules', () => {
-    const prompt = buildBotSystemPrompt(input());
+    const prompt = joinPrompt(buildBotSystemPrompt(input()));
     expect(prompt).toContain('Operating rules:');
     expect(prompt).toContain('Work, don\'t narrate');
     expect(prompt).toContain('Nothing to do:');
   });
 
   it('a chat turn asks for an answer and drops the refusal instruction', () => {
-    const prompt = buildBotSystemPrompt(input({ mode: 'chat' }));
+    const prompt = joinPrompt(buildBotSystemPrompt(input({ mode: 'chat' })));
     expect(prompt).toContain('Conversation rules:');
     expect(prompt).toContain('Your final text IS your reply');
     expect(prompt).not.toContain('Nothing to do:');
@@ -50,12 +55,12 @@ describe('bot system prompt', () => {
   });
 
   it('a chat turn answers in the conversation instead of delivering files', () => {
-    const prompt = buildBotSystemPrompt(input({ mode: 'chat' }));
+    const prompt = joinPrompt(buildBotSystemPrompt(input({ mode: 'chat' })));
     expect(prompt).toContain('Do not deliver a file unless the owner explicitly asks');
   });
 
   it('a chat turn still carries the persona and the sandbox', () => {
-    const prompt = buildBotSystemPrompt(input({ mode: 'chat' }));
+    const prompt = joinPrompt(buildBotSystemPrompt(input({ mode: 'chat' })));
     expect(prompt).toContain('Atelier');
     expect(prompt).toContain('Tu es un banc dessai de rendu.');
     expect(prompt).toContain('/tmp/ws');

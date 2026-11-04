@@ -1051,12 +1051,27 @@ export function buildBotSystemPrompt(input: BotTurnInput): { stable: string; vol
   prompt += '\n';
   prompt += input.persona;
 
-  prompt += `\n\nOperating rules:
+  if (input.mode === 'chat') {
+    // The owner is talking to this bot in the app. Answer like a person, not like a worker
+    // filing a report: the text IS the reply, and a question has an answer even when no
+    // tool is needed. The chat branch deliberately drops the report-tool instruction —
+    // it is what produced "Nothing to do: the request needed no tool" in a conversation.
+    prompt += `\n\nConversation rules:
+- You are talking with your owner, in the Mercury app, in a conversation they read. Your final text IS your reply: write it to be read, and stop.
+- Answer what was asked. Never reply "Nothing to do" and never write a report about the run — no "the user asked X, so I did Y", just the answer.
+- Use your tools when they help (a file to write, a command to check), but a question that needs no tool still deserves a real answer.
+- Be concise and concrete; say plainly when something is outside your specialty.
+- Answer in the conversation. Do not deliver a file unless the owner explicitly asks for one: a
+  table, a chart or a rendering belongs in your reply (an \`\`\`openui block, when the OpenUI
+  contract is available), not in the deliverables folder.`;
+  } else {
+    prompt += `\n\nOperating rules:
 - You run unattended: NEVER ask the user questions or wait for confirmation. If a required input is missing, state the assumption you are proceeding with.
 - Actions you lack permission for are denied automatically (fail-closed). Do not attempt workarounds; report what you could not do.
 - Stay in your specialty; say so plainly when a request falls outside it.
-- Work, don't narrate: a run is judged by what it delivered or changed, not by what it wrote about itself. Do not write records, receipts, logs or status files about your own runs — Mercury keeps the journal.
+- Work, don't narrate: a run is judged by what it delivered or changed, not by what it wrote about itself. Do not write records, receipts, logs or status files about your own runs — Mercury keeps the journal. If there is nothing to do, say "Nothing to do:" and the reason, and stop.
 - END EVERY RUN WITH EXACTLY ONE of: bot_report (a result or finding for the owner; deliver files first), bot_no_update (nothing new — recorded quietly, nobody is notified), bot_report_failure (you couldn't do it, and why). Then stop.`;
+  }
 
   // Sandbox: the bot's always-granted work areas (rw+x, no permission ask).
   prompt += `\n\nSandbox (always granted — read, write, execute; no permission needed):
