@@ -89,6 +89,9 @@ import {
 } from '../utils/config.js';
 import { fetchProviderModelCatalog, getPreferredModelsForProvider } from '../utils/provider-models.js';
 import { WorkLedger, type WorkEntry } from './work-ledger.js';
+import { ContextKeeper } from './context-keeper.js';
+import { keeperFor, makeNotesWriter, selectKeeperHistory, turnsOfSession } from './context-keeper-agent.js';
+import type { SessionMessage } from '../sessions/types.js';
 import { MAX_PROVIDER_ATTEMPT_MS, MAX_AUTOMATIC_CONTINUATIONS, needsContinuationApproval, needsRetryApproval, withAbortDeadline } from './execution-limits.js';
 import { requiresFinalSend } from './response-delivery.js';
 import { updateCliProviderStatus } from './provider-status.js';
@@ -3150,10 +3153,69 @@ export class Agent {
       // ten messages, and includes the compact tool trace written at the end
       // of each turn, so this turn remembers what the previous one read and
       // wrote instead of starting blind.
-      const recentMemory = selectHistoryWindow(
-        activeSession.messages,
-        this.saverMode.isActive() ? HISTORY_TOKEN_BUDGET_SAVER : HISTORY_TOKEN_BUDGET,
-      );
+      // The keeper (config `tokens.keeper.enabled`) replaces the plain
+      // sliding window when it is on: budgeted history with model-written
+      // notes and a verbatim archive instead of silent amnesia. A refused cut
+      // falls back to the window — the full history rather than a lying
+      // compression, which is the gate's whole point.
+      let recentMemory: SessionMessage[];
+      if (this.config.tokens?.keeper?.enabled) {
+        const keeperTurns = turnsOfSession(activeSession.messages);
+        // The window is the repli, decided up front: a keeper that cannot make
+        // a cut (no notes writer, refused layout) must not silently send a
+        // half-selected history either.
+        const fallbackWindow = () =>
+          selectHistoryWindow(
+            activeSession.messages,
+            this.saverMode.isActive() ? HISTORY_TOKEN_BUDGET_SAVER : HISTORY_TOKEN_BUDGET,
+          );
+        const kept = await selectKeeperHistory(
+          this.keeperForSession(canonicalSession.id),
+          keeperTurns,
+          makeNotesWriter(() => {
+            try {
+              return this.learningProviders().getDefault().getModelInstance();
+            } catch {
+              return null;
+            }
+          }),
+        );
+        if (kept.outcome === 'fits' || kept.outcome === 'too_short') {
+          recentMemory = fallbackWindow();
+        } else if (kept.outcome === 'cut') {
+          const eligible = activeSession.messages.filter(
+            (m) => (m.role === 'user' || m.role === 'assistant') && (m.kind === 'message' || m.kind === 'tool-call'),
+          );
+          // The keeper numbered itself over the same eligible list; map back by
+          // position (the notes turn is keeper material, added as a block).
+          const keepNumbers = new Set(kept.turns.filter((t) => t.number >= 0).map((t) => t.number));
+          recentMemory = eligible.filter((_, i) => keepNumbers.has(i));
+          const notesTurn = kept.turns.find((t) => t.number < 0);
+          if (notesTurn) {
+            recentMemory = [
+              {
+                id: 'keeper-notes',
+                sessionId: canonicalSession.id,
+                role: 'user',
+                kind: 'message',
+                content: notesTurn.content,
+                timestamp: Date.now(),
+                sequence: recentMemory.length ? recentMemory[recentMemory.length - 1].sequence + 1 : 0,
+              },
+              ...recentMemory,
+            ];
+          }
+        } else {
+          // notes_rejected: the gate refused the compression — send the
+          // budgeted window, never a view the keeper did not vouch for.
+          recentMemory = fallbackWindow();
+        }
+      } else {
+        recentMemory = selectHistoryWindow(
+          activeSession.messages,
+          this.saverMode.isActive() ? HISTORY_TOKEN_BUDGET_SAVER : HISTORY_TOKEN_BUDGET,
+        );
+      }
 
       const messages: any[] = [];
       // Per-turn context (retrieved memory, shared-pool hits, loop warnings)
@@ -5043,6 +5105,23 @@ export class Agent {
    * when it names a usable provider, else the chat default. Resolved per call so
    * a key added at runtime or a changed default is picked up.
    */
+  /**
+   * One keeper per conversation, for the process lifetime: the notes live in
+   * memory, the archive on disk (`keeperFor` reloads it). A saver-mode flip
+   * rebuilds it with the saver budget — the archive carries over untouched.
+   */
+  private keeperForSession(sessionId: string): ContextKeeper {
+    const saver = this.saverMode.isActive();
+    const key = `${sessionId}:${saver ? 'saver' : 'std'}`;
+    let keeper = this.keepers.get(key);
+    if (!keeper) {
+      keeper = keeperFor(sessionId, saver);
+      this.keepers.set(key, keeper);
+    }
+    return keeper;
+  }
+  private readonly keepers = new Map<string, ContextKeeper>();
+
   private learningProviders(): { getDefault(): ReturnType<ProviderRegistry['getDefault']> } {
     return {
       getDefault: () => {
