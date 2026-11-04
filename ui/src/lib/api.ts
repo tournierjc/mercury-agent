@@ -632,9 +632,17 @@ export interface AppConfig {
   tokenBudget: number;
 }
 
+export interface ProviderRouting {
+  order?: string[];
+  quantizations?: string[];
+  allowFallbacks?: boolean;
+}
+
 export interface ProviderInfo {
   name: string;
   recommended?: boolean;
+  /** OpenRouter only: the endpoint pin, absent when nothing is pinned. */
+  routing?: ProviderRouting;
   maskedKey: string;
   baseUrl: string;
   model: string;
@@ -642,6 +650,7 @@ export interface ProviderInfo {
 }
 
 export interface ProviderUpdate {
+  routing?: ProviderRouting;
   apiKey?: string;
   baseUrl?: string;
   model?: string;
