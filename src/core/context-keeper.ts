@@ -22,7 +22,7 @@
  * the daemon keeps its session files); nothing ever leaves the machine.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   EMPTY_NOTES,
   applyDelta,
@@ -101,6 +101,7 @@ export class TurnArchive {
   append(turns: KeeperTurn[]): void {
     this.turns = this.turns.concat(turns);
     if (this.path) {
+      mkdirSync(dirname(this.path), { recursive: true });
       for (const t of turns) appendFileSync(this.path, JSON.stringify(t) + '\n');
     }
   }
