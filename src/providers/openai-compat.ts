@@ -73,44 +73,28 @@ function withReasoningPref(providerName: string): typeof fetch {
 }
 
 /**
- * OpenRouter serves the same weights from many hosts. `routing` pins one: the
- * gateway reads a `provider` block in the body (`order`, `quantizations`,
- * `allow_fallbacks`), which the OpenAI SDK has no field for — so it is written
- * on the wire, the same way the reasoning level above is.
+ * The client an endpoint is reached through.
  *
- * Only `openrouter` gets this: another gateway that happened to understand the
- * key would be a coincidence, and sending it could be a hard 400.
+ * `openai` is the default and stays the default: it is what every provider here
+ * already uses, and the two clients differ in more than thinking — tool calls and
+ * multi-part messages are placed slightly differently.
+ *
+ * `compatible` exists because of a measured loss. OpenAI's own client reads the
+ * `reasoning` field of OpenAI's API; a compatible server answers with
+ * `reasoning_content`, which the client counts as reasoning tokens and drops. On
+ * our local Qwen and on OpenRouter the stream carried zero reasoning parts while
+ * the API reported 16 to 85 reasoning tokens. The agent (`core/agent.ts`) and the
+ * bot turn (`bots/bot-turn.ts`) both record thinking from those parts, so with
+ * `openai` the thinking was fetched, paid for, and thrown away.
  */
-function withOpenRouterRouting(config: ProviderConfig): typeof fetch {
-  const routing = config.routing;
-  const order = routing?.order ?? [];
-  const quantizations = routing?.quantizations ?? [];
-  if (config.name !== 'openrouter' || (order.length === 0 && quantizations.length === 0)) {
-    return globalThis.fetch;
+export function providerTransport(config: ProviderConfig): ProviderTransport {
+  const transport = config.transport ?? 'openai';
+  if (transport !== 'openai' && transport !== 'compatible') {
+    throw new Error(
+      `[${config.name}] transport "${String(config.transport)}" is not one of "openai", "compatible"`,
+    );
   }
-  return async (input, init) => {
-    if (typeof init?.body === 'string') {
-      try {
-        const body = JSON.parse(init.body) as Record<string, unknown>;
-        body.provider = {
-          ...(order.length > 0 ? { order } : {}),
-          ...(quantizations.length > 0 ? { quantizations } : {}),
-          // A pinned endpoint that is down should fail loudly rather than be
-          // swapped for another host behind the caller's back.
-          allow_fallbacks: routing?.allowFallbacks ?? false,
-        };
-        init = { ...init, body: JSON.stringify(body) };
-      } catch { /* not JSON — pass through */ }
-    }
-    return globalThis.fetch(input, init);
-  };
-}
-
-/** One hook for the wire: routing when it applies, the reasoning level otherwise. */
-function openaiCompatFetch(config: ProviderConfig): typeof fetch | undefined {
-  if (providerHasReasoningControl(config.name)) return withReasoningPref(config.name);
-  const routed = withOpenRouterRouting(config);
-  return routed === globalThis.fetch ? undefined : routed;
+  return transport;
 }
 
 export class OpenAICompatProvider extends BaseProvider {

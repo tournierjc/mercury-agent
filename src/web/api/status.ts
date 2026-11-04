@@ -44,22 +44,18 @@ export function getStatus(): AgentStatus {
 const status = new Hono();
 
 let runtimeVersion = '';
-/**
- * The version the listener reports, from whichever package.json sits above the running file.
- *
- * This counted `..` segments from `src/web/api/`, which is right for the sources and wrong for the
- * shipped bundle: packed, the code runs from `dist/mercury.js`, three levels up lands in
- * `node_modules/` where no package.json describes this agent, and `/api/health` answered
- * `version: ""` on every installed instance — the dashboard and the phone showed no version at all.
- * Walk up instead, and keep the first package.json that carries one.
- */
-function versionString(): string {
+/** The running Mercury's version (for display and the updater). */
+export function versionString(): string {
   if (runtimeVersion) return runtimeVersion;
-  const fromEnv = process.env.MERCURY_CHANNEL_VERSION;
+  const fromEnv = process.env.MERCURY_CHANNEL_VERSION
+    || (globalThis as { __MERCURY_VERSION__?: string }).__MERCURY_VERSION__;
   if (fromEnv) {
     runtimeVersion = fromEnv;
     return runtimeVersion;
   }
+  // Packed, the code runs from dist/ — counting fixed `..` segments landed in
+  // node_modules/, where no package.json describes this agent, so installed
+  // instances answered version:"". Walk up and keep the first real version.
   let dir = dirname(fileURLToPath(import.meta.url));
   for (let depth = 0; depth < 4; depth += 1) {
     try {

@@ -187,21 +187,16 @@ providers.get('/api/providers', (c) => {
 /** Everything the Settings screen needs in one call: providers, the default, and roles. */
 providers.get('/api/providers/settings', (c) => {
   const config = loadConfig();
-
-  const validNames: ProviderName[] = ['aimlapi', 'mercuryCloud', 'openai', 'anthropic', 'deepseek', 'grok', 'atlascloud', 'ollamaCloud', 'ollamaLocal', 'atomicChat', 'openaiCompat', 'openrouter', 'litellm', 'lmStudio', 'mimo', 'mimoTokenPlan'];
-  if (!validNames.includes(providerName)) {
-    return c.json({ error: 'Unknown provider' }, 400);
-  }
-
-  const p = config.providers[providerName];
-  if (body.apiKey !== undefined) p.apiKey = body.apiKey;
-  if (body.baseUrl !== undefined) p.baseUrl = body.baseUrl;
-  if (body.model !== undefined) p.model = body.model;
-  if (body.enabled !== undefined) p.enabled = body.enabled;
-
-  saveConfig(config);
-  // Keys and models are read at boot — the save is durable, not live.
-  return c.json({ success: true, restartRequired: true });
+  const def = config.providers.default;
+  return c.json({
+    providers: NAMES.filter((n) => config.providers[n]).map((n) => describe(n, config.providers[n], config)),
+    default: { provider: def, model: config.providers[def]?.model ?? '' },
+    roles: {
+      learning: config.memory.learning?.provider ?? null,
+      crew: config.bots?.fleets?.crewProvider ?? null,
+    },
+    setupRequired: isSetupRequired(),
+  });
 });
 
 /**

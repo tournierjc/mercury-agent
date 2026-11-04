@@ -143,22 +143,6 @@ const MERCURY_CLOUD_PREFERRED_MODELS = [
   'mercury-gpt5',
 ] as const;
 
-/**
- * OpenRouter namespaces every id by lab, and its catalogue is the union of the
- * labs it fronts, so a short list of well-known ids is enough to seed the
- * picker — the rest comes from `/models` at test time.
- */
-export const OPENROUTER_PREFERRED_MODELS = [
-  'anthropic/claude-sonnet-4.6',
-  'anthropic/claude-haiku-4.5',
-  'openai/gpt-5.1',
-  'openai/gpt-5.1-mini',
-  'google/gemini-3-pro',
-  'deepseek/deepseek-v3.2',
-  'qwen/qwen3.5-235b-a22b',
-  'mistralai/mistral-large-2',
-] as const;
-
 export class ProviderModelFetchError extends Error {
   constructor(message: string) {
     super(message);
@@ -181,7 +165,6 @@ export function getPreferredModelsForProvider(provider: ProviderName): string[] 
     ollamaLocal: OLLAMA_LOCAL_PREFERRED_MODELS,
     atomicChat: ATOMIC_CHAT_PREFERRED_MODELS,
     openaiCompat: OPENAI_COMPAT_PREFERRED_MODELS,
-    openrouter: OPENROUTER_PREFERRED_MODELS,
     litellm: OPENAI_COMPAT_PREFERRED_MODELS,
     lmStudio: LM_STUDIO_PREFERRED_MODELS,
     mimo: MIMO_PREFERRED_MODELS,
@@ -312,7 +295,6 @@ function chooseRecommendedModel(
     ollamaLocal: OLLAMA_LOCAL_PREFERRED_MODELS,
     atomicChat: ATOMIC_CHAT_PREFERRED_MODELS,
     openaiCompat: OPENAI_COMPAT_PREFERRED_MODELS,
-    openrouter: OPENROUTER_PREFERRED_MODELS,
     mimo: MIMO_PREFERRED_MODELS,
     mimoTokenPlan: MIMO_TOKEN_PLAN_PREFERRED_MODELS,
     chatgptWeb: CHATGPT_WEB_PREFERRED_MODELS,
@@ -365,7 +347,6 @@ export function buildModelCatalog(
     ollamaLocal: OLLAMA_LOCAL_PREFERRED_MODELS,
     atomicChat: ATOMIC_CHAT_PREFERRED_MODELS,
     openaiCompat: OPENAI_COMPAT_PREFERRED_MODELS,
-    openrouter: OPENROUTER_PREFERRED_MODELS,
     mimo: MIMO_PREFERRED_MODELS,
     mimoTokenPlan: MIMO_TOKEN_PLAN_PREFERRED_MODELS,
     chatgptWeb: CHATGPT_WEB_PREFERRED_MODELS,
@@ -400,8 +381,6 @@ async function fetchOpenAICompatModels(provider: ProviderName, config: ProviderC
     errorMessage = 'Mercury could not fetch models for this DeepSeek key. Please re-enter it.';
   } else if (provider === 'aimlapi') {
     errorMessage = 'Mercury could not fetch models for this AI/ML API key. Please re-enter it.';
-  } else if (provider === 'openrouter') {
-    errorMessage = 'Mercury could not fetch models from OpenRouter. Please check your key and try again.';
   } else if (provider === 'openaiCompat' || provider === 'atomicChat' || provider === 'lmStudio') {
     errorMessage = 'Mercury could not fetch models from this server. Please check the base URL and try again.';
   } else if (provider === 'litellm') {
@@ -429,7 +408,7 @@ async function fetchOpenAICompatModels(provider: ProviderName, config: ProviderC
       if (provider === 'deepseek') {
         return id.startsWith('deepseek-');
       }
-      if (provider === 'openaiCompat' || provider === 'openrouter' || provider === 'litellm' || provider === 'atomicChat' || provider === 'lmStudio') {
+      if (provider === 'openaiCompat' || provider === 'litellm' || provider === 'atomicChat' || provider === 'lmStudio') {
         return id.length > 0;
       }
       if (provider === 'atlascloud') {
@@ -653,7 +632,7 @@ async function fetchCatalog(provider: ProviderName, config: ProviderConfig): Pro
     return fetchOllamaLocalModels(config);
   }
 
-  if (provider === 'openaiCompat' || provider === 'openrouter' || provider === 'litellm' || provider === 'atomicChat') {
+  if (provider === 'openaiCompat' || provider === 'litellm' || provider === 'atomicChat') {
     return fetchOpenAICompatModels(provider, config);
   }
 

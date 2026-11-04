@@ -183,7 +183,6 @@ const PROVIDER_LABELS: Record<string, string> = {
   lmStudio: 'LM Studio',
   atomicChat: 'Atomic Chat',
   openaiCompat: 'OpenAI-compatible',
-  openrouter: 'OpenRouter',
   litellm: 'LiteLLM',
   aimlapi: 'AI/ML API',
   atlascloud: 'Atlas Cloud',
