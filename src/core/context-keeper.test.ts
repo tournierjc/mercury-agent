@@ -172,6 +172,27 @@ describe('the kept view', () => {
     const outcome = await k.maybeCompress(small, nullWriter);
     expect(outcome.skip).toBe('fits');
   });
+
+  it('the kept view never exceeds the effective budget for large conversations', async () => {
+    const k = keeper(perfectWriter, 4096);
+    const conversation = longConversation(40, 900);
+    await k.maybeCompress(conversation, perfectWriter);
+    const view = k.viewFor(conversation);
+    // The pinned notes turn is exempt: it is the summary the model needs to
+    // know how much sits in the archive. The kept conversation turns must fit
+    // the same effective budget needsCompression() measures against.
+    const withoutNotes = view.filter((t) => t.number !== -1);
+    expect(k.needsCompression(withoutNotes)).toBe(false);
+  });
+
+  it('a conversation too short to cut is reported as too short, not fits', async () => {
+    const k = keeper(perfectWriter, 512);
+    const oneHugeTurn = [turn(0, 'user', 'x'.repeat(4000))];
+    const outcome = await k.maybeCompress(oneHugeTurn, perfectWriter);
+    expect(outcome.skip).toBe('too_short');
+    // Nothing left the view: the archive stays empty.
+    expect(k.archivedTurns().length).toBe(0);
+  });
 });
 
 describe('the notes contract (ctxkeeper layout)', () => {
