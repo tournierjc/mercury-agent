@@ -47,19 +47,15 @@ let runtimeVersion = '';
 /** The running Mercury's version (for display and the updater). */
 export function versionString(): string {
   if (runtimeVersion) return runtimeVersion;
-  try {
-    // tsup bakes the version into the bundle (globalThis.__MERCURY_VERSION__);
-    // package.json is only reachable when running from source.
-    runtimeVersion = process.env.MERCURY_CHANNEL_VERSION
-      || (globalThis as { __MERCURY_VERSION__?: string }).__MERCURY_VERSION__
-      || JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'package.json'), 'utf8')).version
-      || '';
-  } catch { runtimeVersion = ''; }
-  const fromEnv = process.env.MERCURY_CHANNEL_VERSION;
+  const fromEnv = process.env.MERCURY_CHANNEL_VERSION
+    || (globalThis as { __MERCURY_VERSION__?: string }).__MERCURY_VERSION__;
   if (fromEnv) {
     runtimeVersion = fromEnv;
     return runtimeVersion;
   }
+  // Packed, the code runs from dist/ — counting fixed `..` segments landed in
+  // node_modules/, where no package.json describes this agent, so installed
+  // instances answered version:"". Walk up and keep the first real version.
   let dir = dirname(fileURLToPath(import.meta.url));
   for (let depth = 0; depth < 4; depth += 1) {
     try {
