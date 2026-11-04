@@ -169,6 +169,15 @@ export interface BotPipelineConfig {
  * fail-closed, so only explicit grants exist.
  */
 export interface BotPermissionsFile {
+  /**
+   * The tier the owner picked, written next to the grants it expands to.
+   *
+   * Without it the file is a set of deny/path rules with no name: the app could not tell which
+   * of Lecture / Écriture / Opérateur / Complet was applied, so choosing one looked like doing
+   * nothing. Absent on files written before this field — the app then infers the tier from the
+   * grants and says so.
+   */
+  tier?: 'readonly' | 'builder' | 'operator' | 'full';
   paths?: BotPathScope[];
   blockedCommands?: string[];
   /**
@@ -225,8 +234,12 @@ export interface BotRunRecord {
   toolCalls?: number;
   /** Largest single-step prompt the provider saw. */
   peakInputTokens?: number;
-  /** What the tool trace proved: deliverable | action | delegated | message | none. */
+  /** What the run did: deliverable | action | delegated | message | quiet | failed | none. */
   outcome?: string;
+  /** How the bot closed the run (Bots 2.0): result | no_update | failure. */
+  report?: 'result' | 'no_update' | 'failure';
+  /** The bot said the job is finished, not just progress. */
+  complete?: boolean;
   deliverables?: string[];
   /** The reply claimed delivery/execution with no matching tool call. */
   claimedWithoutAction?: boolean;
@@ -254,4 +267,14 @@ export interface BotStatusSummary {
   crewWorking?: number;
   /** Earliest automatic resume time of a paused routine, when any is paused. */
   routinePausedUntil?: number;
+  /** The bot has a custom avatar (`GET /api/bots/:id/avatar`); clients draw a monogram otherwise. */
+  hasAvatar?: boolean;
+  /** Unread inbox entries from this bot (Bots 2.0). */
+  unread?: number;
+  /** Its permission tier, or 'custom' for a hand-edited permissions.yaml. */
+  tier?: string;
+  /** Stopped by the owner (durable until Start). */
+  stopped?: boolean;
+  /** One-line description, for lists. */
+  description?: string;
 }

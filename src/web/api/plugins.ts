@@ -8,10 +8,12 @@
  * a LAN or Cloud-relayed session.
  */
 import { Hono, type Context } from 'hono';
-import { isLoopbackRequest } from '../middleware.js';
+import { isThisComputer } from '../middleware.js';
+import { requireOwner } from '../owner-gate.js';
 import { getPluginManager } from '../../plugins/manager.js';
 import { localService } from '../../plugins/service.js';
 import { qrSvg } from '../../plugins/qr-svg.js';
+import { RENDERER_HEADERS, duplicateLanguages, listRenderers, readRendererAsset } from '../../plugins/renderers.js';
 
 const plugins = new Hono();
 
@@ -19,9 +21,14 @@ function svc() {
   return localService(getPluginManager());
 }
 
+/**
+ * Plugins run code on this computer: changing them from another device waits
+ * for the owner's approval (on this computer it just happens).
+ */
 function localOnly(c: Context): Response | null {
-  if (isLoopbackRequest(c)) return null;
-  return c.json({ error: 'Plugins can only be installed or changed from this machine.' }, 403);
+  if (isThisComputer(c)) return null;
+  const path = new URL(c.req.url).pathname;
+  return requireOwner(c, { id: `plugins:${c.req.method}:${path}`, title: `Change plugins (${c.req.method} ${path.replace('/api/plugins', '') || '/'})` });
 }
 
 function fail(c: Context, err: unknown) {
@@ -29,6 +36,25 @@ function fail(c: Context, err: unknown) {
   const status = /not installed|No plugin called|no setting/i.test(message) ? 404 : 400;
   return c.json({ error: message }, status);
 }
+
+/**
+ * Fenced-block renderers a plugin contributes (Plugin API 1.3).
+ *
+ * The listing is for the authenticated dashboard; the asset itself is public and
+ * cookieless, because it is loaded by `<iframe sandbox="allow-scripts">` — an opaque
+ * origin, which never carries the session cookie. It ships behind a CSP that allows
+ * nothing but its own inline script and styles, so a renderer cannot call out.
+ */
+plugins.get('/api/ui/renderers', (c) => {
+  const renderers = listRenderers();
+  return c.json({ renderers });
+});
+
+plugins.get('/api/ui/renderers/:id/:language', (c) => {
+  const asset = readRendererAsset(c.req.param('id'), c.req.param('language'));
+  if (!asset) return c.json({ error: 'No such renderer' }, 404);
+  return new Response(asset.html, { headers: RENDERER_HEADERS });
+});
 
 plugins.get('/api/plugins', async (c) => {
   try {

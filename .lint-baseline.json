@@ -9,7 +9,7 @@
     "@typescript-eslint/no-require-imports": 6,
     "@typescript-eslint/no-this-alias": 5,
     "@typescript-eslint/no-unused-expressions": 100,
-    "@typescript-eslint/no-unused-vars": 278,
+    "@typescript-eslint/no-unused-vars": 276,
     "no-console": 135,
     "no-control-regex": 27,
     "no-func-assign": 5,

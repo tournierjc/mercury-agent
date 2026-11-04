@@ -1,16 +1,23 @@
 import { useEffect, useState, useRef } from "react";
+import { createEventStream, type EventStream } from "@/lib/sse";
 
 /**
- * Live fleet feed — one EventSource per mounted cockpit. Rides the same
+ * Live fleet feed — one event stream per mounted cockpit. Rides the same
  * in-process activity bus as the CLI's bot-thread live region, so what the
- * dashboard shows is what the bot is doing right now. EventSource reconnects
- * natively; components keep their periodic roster poll as the fallback.
+ * dashboard shows is what the bot is doing right now. The stream reconnects
+ * by itself; components keep their periodic roster poll as the fallback.
  */
 export interface BotEventState {
   /** botId → current activity label ("read_file …","fetch_url …"). */
   activity: Record<string, string>;
   /** Newest delivered artifact — the deliverables inbox banners + refreshes live on this. */
   lastDelivery: { botId: string; name: string; at: number } | null;
+  /**
+   * Bumped on every `bot_roster` frame — the core re-broadcasts the roster when an avatar
+   * changes, which is how a face set on the phone reaches an open dashboard. Used as the
+   * cache-buster of each `<img>`; the periodic poll stays the fallback.
+   */
+  rosterSeq: number;
   connected: boolean;
 }
 
@@ -18,12 +25,13 @@ export function useBotEvents(): BotEventState {
   const [state, setState] = useState<BotEventState>({
     activity: {},
     lastDelivery: null,
+    rosterSeq: 0,
     connected: false,
   });
-  const esRef = useRef<EventSource | null>(null);
+  const esRef = useRef<EventStream | null>(null);
 
   useEffect(() => {
-    const es = new EventSource(`${window.location.origin}/api/bots/events`);
+    const es = createEventStream("/api/bots/events");
     esRef.current = es;
 
     es.addEventListener("bot_activity", (e) => {
@@ -57,6 +65,10 @@ export function useBotEvents(): BotEventState {
           return { ...prev, activity };
         });
       } catch {}
+    });
+
+    es.addEventListener("bot_roster", () => {
+      setState((prev) => ({ ...prev, rosterSeq: prev.rosterSeq + 1 }));
     });
 
     es.onopen = () => setState((p) => ({ ...p, connected: true }));

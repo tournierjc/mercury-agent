@@ -29,7 +29,10 @@ export class BotJournal {
    * tool trace and the full reply — so a journal row can be explained after
    * the fact. Bounded: the oldest files beyond `keepTranscripts` are pruned.
    */
-  writeTranscript(record: BotRunRecord, body: { prompt: string; output: string; trace: unknown[] }): string | null {
+  writeTranscript(
+    record: BotRunRecord,
+    body: { prompt: string; output: string; trace: unknown[]; reasoning?: unknown[] },
+  ): string | null {
     assertValidBotId(record.botId);
     if (this.keepTranscripts <= 0) return null;
     const dir = join(this.dir, BOT_TRANSCRIPTS_DIRNAME);

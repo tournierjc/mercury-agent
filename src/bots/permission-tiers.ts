@@ -54,6 +54,7 @@ export function isPermissionTier(value: string): value is PermissionTier {
  */
 export function tierPermissionsFile(tier: PermissionTier): BotPermissionsFile {
   const file: BotPermissionsFile = {
+    tier,
     paths: [{ scope: 'self', read: true, write: true, execute: tier === 'operator' || tier === 'full' }],
     tools: { deny: [...PERMISSION_TIERS[tier].deny] },
   };
@@ -70,4 +71,23 @@ export function tierPermissionsFile(tier: PermissionTier): BotPermissionsFile {
  */
 export function applyPermissionTier(manifest: { tools?: { allow?: string[]; deny?: string[] } }, tier: PermissionTier): void {
   manifest.tools = { ...(manifest.tools ?? {}), deny: [...PERMISSION_TIERS[tier].deny] };
+}
+
+/**
+ * Which tier a permissions.yaml matches, or 'custom' when it was edited by
+ * hand (extra paths, an allow list, a different deny list). The app shows the
+ * tier by name, and 'custom' as exactly that.
+ */
+export function detectTier(perms: BotPermissionsFile | null | undefined): PermissionTier | 'custom' {
+  if (!perms) return 'custom';
+  const key = (f: BotPermissionsFile) => JSON.stringify({
+    deny: [...(f.tools?.deny ?? [])].sort(),
+    allow: [...(f.tools?.allow ?? [])].sort(),
+    paths: (f.paths ?? []).map((p) => `${p.scope}:${p.read ? 'r' : ''}${p.write ? 'w' : ''}${p.execute ? 'x' : ''}`).sort(),
+  });
+  const mine = key(perms);
+  for (const tier of Object.keys(PERMISSION_TIERS) as PermissionTier[]) {
+    if (key(tierPermissionsFile(tier)) === mine) return tier;
+  }
+  return 'custom';
 }

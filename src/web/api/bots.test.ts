@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { existsSync, mkdtempSync, readdirSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getDefaultConfig } from '../../utils/config.js';
@@ -51,6 +51,10 @@ afterEach(() => {
 });
 
 const jreq = (res: Response) => res.json() as Promise<any>;
+
+/** What a fleet-feed client receives: the event name, and the roster it carries. */
+type RosterBody = { bots: Array<Record<string, unknown>>; queue?: Record<string, number> };
+type RosterFeed = Array<{ event: string; data: RosterBody }>;
 
 describe('web bots API — cockpit', () => {
   it('GET tiers returns the executable tier catalog', async () => {

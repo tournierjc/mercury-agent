@@ -24,21 +24,23 @@ export const MANIFEST_VERSION = 1 as const;
  * Minor bumps only add; a major bump is a breaking change and the previous
  * major stays supported for at least two Mercury minor releases.
  */
-export const PLUGIN_API_VERSION = '1.2.0';
+export const PLUGIN_API_VERSION = '1.3.0';
 
 export const PLUGIN_ID_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/;
 /** Tool and command names a plugin declares (before namespacing). */
 export const PLUGIN_TOOL_NAME_RE = /^[a-z][a-z0-9_]{0,29}$/;
+/** Ids a plugin can't take: `mcp` tools are named `mcp__<server>__<tool>` (ADR-029). */
+export const RESERVED_PLUGIN_IDS: ReadonlySet<string> = new Set(['mcp']);
 /**
  * Built-in command names a plugin can never take. Kept in sync with the
  * TUI's SLASH_COMMANDS by src/plugins/commands.test.ts.
  */
 export const RESERVED_COMMANDS: ReadonlySet<string> = new Set([
   'agents', 'bg', 'bot', 'bots', 'budget', 'call', 'calls', 'chat', 'cloud', 'code', 'halt', 'help', 'log', 'memory', 'menu', 'models', 'model',
-  'permissions', 'plugin', 'plugins', 'progress', 'research', 'reset', 'saver', 'session', 'sessions', 'skills', 'spotify',
+  'permissions', 'plugin', 'plugins', 'progress', 'research', 'reset', 'server', 'saver', 'session', 'sessions', 'skills', 'spotify',
   'status', 'stop', 'stream', 'tools', 'update', 'view', 'whatsnew', 'ws', 'start', 'skip', 'new', 'compact', 'clear',
   'approve', 'deny', 'yes', 'no', 'cancel', 'pair', 'unpair', 'telegram', 'discord', 'slack', 'signal', 'web', 'exit', 'quit',
-  'usage', 'cost', 'doctor', 'settings', 'config', 'login', 'logout', 'upgrade', 'version', 'about',
+  'usage', 'cost', 'doctor', 'settings', 'config', 'login', 'logout', 'upgrade', 'version', 'about', 'mcp',
 ]);
 
 /** Mercury providers a plugin can ask to use (Plugin API 1.1). */
@@ -69,6 +71,25 @@ const relPath = z.string().min(1).max(200).refine(
 
 const strictSemver = z.string().refine((v) => semver.valid(v) !== null && semver.clean(v) === v, 'must be a semver version like 1.2.3');
 const semverRange = z.string().min(1).max(100).refine((r) => semver.validRange(r) !== null, 'must be a semver range like ">=1.4.0 <2.0.0"');
+
+/**
+ * Plugin API 1.3: a renderer for a fenced block in the dashboard.
+ *
+ * The client never executes plugin code with the app's origin: the asset is served by
+ * Mercury behind a locked-down CSP and drawn inside `<iframe sandbox="allow-scripts">`,
+ * with no same-origin, no forms and no network. A renderer gets pixels and a message
+ * channel — nothing that can read the transcript or call out.
+ */
+const rendererDecl = z.object({
+  /** Fence language it claims, e.g. "openui". One renderer per language. */
+  language: z.string().regex(/^[a-z][a-z0-9_-]{1,31}$/, 'lowercase letters, digits, - and _, 2-32 characters'),
+  /** Shown nowhere yet; a place for the client to label a refused block. */
+  title: z.string().min(1).max(60).optional(),
+  /** A self-contained HTML file inside the plugin folder. Served as text/html. */
+  asset: relPath,
+  /** Only iframe is defined in v1.3: in-page script would share the session. */
+  sandbox: z.literal('iframe').default('iframe'),
+}).strict();
 
 const toolDecl = z.object({
   name: z.string().regex(PLUGIN_TOOL_NAME_RE, 'lowercase letters, digits and underscores, max 30 characters'),
@@ -150,7 +171,8 @@ const serverSpec = z.object({
 
 export const manifestSchema = z.object({
   manifestVersion: z.literal(MANIFEST_VERSION),
-  id: z.string().regex(PLUGIN_ID_RE, '3-32 characters: lowercase letters, digits and hyphens, starting with a letter'),
+  id: z.string().regex(PLUGIN_ID_RE, '3-32 characters: lowercase letters, digits and hyphens, starting with a letter')
+    .refine((id) => !RESERVED_PLUGIN_IDS.has(id), (id) => ({ message: `"${id}" is reserved by Mercury` })),
   name: z.string().min(1).max(60),
   version: strictSemver,
   description: z.string().min(1).max(280),
@@ -179,6 +201,8 @@ export const manifestSchema = z.object({
      * are keyed by them) can be provided by a plugin.
      */
     channel: z.object({ type: z.enum(PLUGIN_CHANNEL_TYPES) }).strict().optional(),
+    /** Plugin API 1.3: fenced-block renderers the dashboard may offer. */
+    renderers: z.array(rendererDecl).max(4).default([]),
   }).strict().default({ tools: [], commands: [] }),
   /** What the plugin needs. Shown to the owner before install. */
   permissions: z.object({
@@ -341,6 +365,8 @@ export interface PluginListItem {
   tier: 'official' | 'community' | 'local';
   status: PluginStatus;
   installedVersion?: string;
+  /** The version before the last update, if it's still on disk (what rollback goes back to). */
+  previousVersion?: string;
   latestVersion?: string;
   sizeBytes?: number;
   enabled: boolean;
@@ -354,6 +380,8 @@ export interface PluginListItem {
   missing?: Array<{ key: string; unlocks: string; needs: string; fix: string }>;
   /** Plugin API 1.1: the chat channel this plugin provides, and its live state. */
   channel?: { type: string; state?: string; detail?: string; account?: string };
+  /** Plugin API 1.3: fence languages the dashboard draws with this plugin's renderers. */
+  renderers?: string[];
   permissions?: PluginManifest['permissions'];
   disabled?: PluginStateEntry['disabled'];
   lastError?: string;
@@ -389,7 +417,7 @@ const catalogArtifact = z.object({
 }).strict();
 
 export const catalogEntrySchema = z.object({
-  id: z.string().regex(PLUGIN_ID_RE),
+  id: z.string().regex(PLUGIN_ID_RE).refine((id) => !RESERVED_PLUGIN_IDS.has(id)),
   name: z.string().min(1).max(60),
   description: z.string().min(1).max(280),
   version: strictSemver,

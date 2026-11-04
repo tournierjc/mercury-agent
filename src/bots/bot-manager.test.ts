@@ -109,6 +109,11 @@ beforeEach(() => {
 // afterEach disposes all of them before the tmpdir is deleted.
 const activeManagers: Array<{ dispose: () => void }> = [];
 
+/** The bot's system prompt as the model sees it: a `system` string, or leading system messages (cached prefix + per-run part). */
+function systemText(opts: { system?: string; messages?: Array<{ role?: string; content: unknown }> }): string {
+  return opts.system ?? (opts.messages ?? []).filter((m) => m.role === 'system').map((m) => String(m.content)).join('\n');
+}
+
 describe('BotManager queue + turn lifecycle', () => {
   let root: string;
   let store: BotStore;
@@ -338,7 +343,7 @@ describe('BotManager queue + turn lifecycle', () => {
     seedBot(store, 'pathfinder');
     let systemPrompt = '';
     mockedGenerateText.mockImplementation(async (opts: any) => {
-      systemPrompt = opts.system ?? '';
+      systemPrompt = systemText(opts);
       return { text: 'ok', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1 } } as any;
     });
     manager.enqueue('pathfinder', { trigger: 'chat', prompt: 'hi' });
@@ -848,7 +853,7 @@ describe('Bot skill access (native + own library)', () => {
     seedBot(store, 'skilled');
     let systemPrompt = '';
     mockedGenerateText.mockImplementation(async (opts: any) => {
-      systemPrompt = opts.system ?? '';
+      systemPrompt = systemText(opts);
       return { text: 'ok', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1 } } as any;
     });
     manager.enqueue('skilled', { trigger: 'chat', prompt: 'hi' });
@@ -899,6 +904,53 @@ describe('Bot fleets (lead + crew)', () => {
     expect(manager.addCrew('ceo', { id: 'researcher', name: 'Dup' })).toMatchObject({ ok: true, duplicate: true });
     expect(manager.addCrew('ceo', { id: 'brand-new-id', name: 'researcher' })).toMatchObject({ ok: true, duplicate: true });
     expect(store.list().filter(m => m.parent === 'ceo')).toHaveLength(6);
+  });
+
+  it('adoptCrew puts an existing solo bot under a lead, and refuses the impossible cases', () => {
+    setupFleet();
+    store.create({ id: 'veille', name: 'Veille' });
+    store.create({ id: 'autre-chef', name: 'Autre chef', manifest: { fleetRole: 'lead' } });
+    store.create({ id: 'membre-ailleurs', name: 'Membre', manifest: { fleetRole: 'crew', parent: 'autre-chef' } });
+
+    // The nominal case: a solo bot joins, keeping its identity, gaining the lead in comms.
+    const adopted = manager.adoptCrew('ceo', 'veille');
+    expect(adopted).toMatchObject({ ok: true });
+    // Read through the manager's own store: a second BotStore over the same folder would hold
+    // its own manifest cache, and a same-millisecond write aliases to the stale entry.
+    expect(manager.store.get('veille')?.parent).toBe('ceo');
+    expect(manager.store.get('veille')?.fleetRole).toBe('crew');
+    expect(manager.store.get('veille')?.comms?.canMessage).toEqual(['ceo']);
+    // Idempotent: adopting twice is not an error and does not duplicate the crew.
+    expect(manager.adoptCrew('ceo', 'veille')).toMatchObject({ ok: true });
+    expect(manager.store.crewOf('ceo').filter(m => m.id === 'veille')).toHaveLength(1);
+
+    // A lead with members is not free, a member of another fleet is not free, and a bot cannot
+    // join itself. A lead with an empty crew is still a solo bot: it can be taken, and demoted.
+    manager.addCrew('autre-chef', { id: 'sbire', name: 'Sbire' });
+    expect(manager.adoptCrew('ceo', 'autre-chef')).toMatchObject({ ok: false });
+    store.create({ id: 'chef-sans-equipe', name: 'Chef sans équipe', manifest: { fleetRole: 'lead' } });
+    expect(manager.adoptCrew('ceo', 'chef-sans-equipe')).toMatchObject({ ok: true });
+    expect(manager.store.get('chef-sans-equipe')?.fleetRole).toBe('crew');
+    expect(manager.adoptCrew('ceo', 'membre-ailleurs')).toMatchObject({ ok: false });
+    expect(manager.adoptCrew('ceo', 'ceo')).toMatchObject({ ok: false });
+    // Only a lead can adopt.
+    expect(manager.adoptCrew('veille', 'autre-chef')).toMatchObject({ ok: false });
+  });
+
+  it('detachCrew makes a member solo again, and refuses a bot that is not in that fleet', () => {
+    setupFleet();
+    const detached = manager.detachCrew('ceo', 'writer');
+    expect(detached).toMatchObject({ ok: true });
+    expect(manager.store.get('writer')?.parent).toBeUndefined();
+    expect(manager.store.get('writer')?.fleetRole).toBeUndefined();
+    expect(manager.store.get('writer')?.comms?.canMessage ?? []).toEqual([]);
+    expect(manager.store.crewOf('ceo').map(m => m.id)).not.toContain('writer');
+
+    // Detaching again is not a silent success: the fleet no longer holds it.
+    expect(manager.detachCrew('ceo', 'writer')).toMatchObject({ ok: false });
+    // A bot that was never in that fleet is not ours to release.
+    store.create({ id: 'libre', name: 'Libre' });
+    expect(manager.detachCrew('ceo', 'libre')).toMatchObject({ ok: false });
   });
 
   it('delegated tasks return results to the lead mailbox (attributed)', async () => {
@@ -1165,6 +1217,8 @@ describe('bot governance (ADR-020)', () => {
   });
 
   it('a work routine that produces nothing three runs in a row is paused, told once, and resumed by start', async () => {
+    // Back-to-back runs of one routine: lift the 15-minute floor for this test.
+    (manager as unknown as { config: { bots: { routineMinGapMinutes?: number } } }).config.bots.routineMinGapMinutes = 0;
     seedBot(store, 'writer');
     const alerts: string[] = [];
     manager.setAlert(async (m) => { alerts.push(m); });
@@ -1195,7 +1249,11 @@ describe('bot governance (ADR-020)', () => {
     // A completed-but-empty run is shown as such in the bot thread.
     const transcripts = readdirSync(join(store.botDir('writer'), 'transcripts'));
     expect(transcripts.length).toBe(4);
-    expect(readFileSync(join(store.botDir('writer'), 'transcripts', transcripts[0]), 'utf-8')).toContain('"trace"');
+    const transcriptBody = readFileSync(join(store.botDir('writer'), 'transcripts', transcripts[0]), 'utf-8');
+    expect(transcriptBody).toContain('"trace"');
+    // The thinking rides the transcript too: a run is read back to understand what the bot weighed,
+    // not only what it did.
+    expect(transcriptBody).toContain('"reasoning"');
   });
 
   it('a turn-limit stop is journaled as failed/turn_budget but is not an escalation', async () => {

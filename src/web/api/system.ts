@@ -1,4 +1,9 @@
+import { requireOwner } from '../owner-gate.js';
 import { Hono } from 'hono';
+import type { BaseProvider } from '../../providers/base.js';
+import { BUILDER_VERIFIED_NOTE, buildSkillDraft, draftProblem, type SkillDraft } from '../../skills/builder.js';
+import { SELF_MADE_CATEGORY, composeSkillMd, readSelfMadeMeta, slugify } from '../../skills/self-made.js';
+import { readHistory, historySince } from '../../utils/token-history.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SkillLoader } from '../../skills/loader.js';
@@ -26,6 +31,7 @@ system.get('/api/skills', (c) => {
       name: skill.name,
       description: skill.description,
       active: skill.active,
+      selfMade: skill.category === SELF_MADE_CATEGORY,
       version: full?.version ?? null,
       allowedTools: full?.['allowed-tools'] ?? [],
       hasScripts: !!full?.scriptsDir,
@@ -33,6 +39,55 @@ system.get('/api/skills', (c) => {
     };
   });
   return c.json({ skills, total: skills.length });
+});
+
+// ── Skill builder: describe a skill, Mercury writes it, you save it ─────────
+
+type BuilderDeps = { provider: () => BaseProvider; tools: () => string[] };
+let builder: BuilderDeps | null = null;
+/** Registered by the runtime: the model to write with and the tools a skill may use. */
+export function setSkillBuilder(deps: BuilderDeps | null): void { builder = deps; }
+
+system.post('/api/skills/draft', async (c) => {
+  if (!builder) return c.json({ error: 'The skill builder needs Mercury running with a model.' }, 503);
+  const body = (await c.req.json().catch(() => ({}))) as { request?: unknown; previous?: { draft?: unknown; feedback?: unknown } };
+  const request = typeof body.request === 'string' ? body.request.trim() : '';
+  if (request.length < 10) return c.json({ error: 'Say a little more about what the skill should do.' }, 400);
+  if (request.length > 4000) return c.json({ error: 'Keep the description under 4,000 characters.' }, 400);
+  const prev = body.previous && typeof body.previous.feedback === 'string' && body.previous.feedback.trim() && body.previous.draft && typeof body.previous.draft === 'object'
+    ? { draft: body.previous.draft as SkillDraft, feedback: body.previous.feedback }
+    : undefined;
+  try {
+    const tools = builder.tools();
+    const r = await buildSkillDraft(builder.provider(), request, tools, prev);
+    const exists = r.draft.name ? new SkillLoader().load(r.draft.name) : null;
+    return c.json({ ...r, clash: exists && exists.category !== SELF_MADE_CATEGORY ? `"${r.draft.name}" is already an installed skill; pick another name.` : null, tools });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+  }
+});
+
+/** Save a reviewed draft as a self-made skill (marked not run yet until Mercury uses it). */
+system.post('/api/skills/self-made', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { draft?: Partial<SkillDraft> };
+  const d = body.draft ?? {};
+  const draft: SkillDraft = {
+    name: String(d.name ?? '').trim(),
+    description: String(d.description ?? '').trim(),
+    intents: Array.isArray(d.intents) ? d.intents.map((i) => String(i).trim()).filter(Boolean) : [],
+    instructions: String(d.instructions ?? '').trim(),
+    ...(Array.isArray(d.allowedTools) && d.allowedTools.length ? { allowedTools: d.allowedTools.map(String) } : {}),
+  };
+  const problem = draftProblem(draft);
+  if (problem) return c.json({ error: `Not saved: ${problem}.` }, 400);
+  const slug = slugify(draft.name)!;
+  const loader = new SkillLoader();
+  const existing = loader.load(slug);
+  if (existing && existing.category !== SELF_MADE_CATEGORY) return c.json({ error: `"${slug}" is already an installed skill. Pick a different name.`, field: 'name' }, 409);
+  const file = join(loader.rootDir(), SELF_MADE_CATEGORY, slug, 'SKILL.md');
+  const prior = existsSync(file) ? readSelfMadeMeta(readFileSync(file, 'utf-8')) ?? undefined : undefined;
+  loader.saveSkill(`${SELF_MADE_CATEGORY}/${slug}`, composeSkillMd({ ...draft, verified: BUILDER_VERIFIED_NOTE }, prior));
+  return c.json({ success: true, name: slug, updated: !!prior });
 });
 
 system.post('/api/skills/install', async (c) => {
@@ -47,6 +102,9 @@ system.post('/api/skills/install', async (c) => {
   } catch {
     return c.json({ success: false, error: 'invalid url' }, 400);
   }
+  // A skill is instructions Mercury follows from then on: from another device, the owner decides.
+  const wait = requireOwner(c, { id: `skills.install:${url}`, title: 'Install a skill from a web address', detail: url });
+  if (wait) return wait;
 
   try {
     const loader = new SkillLoader();
@@ -119,6 +177,8 @@ system.get('/api/permissions', (c) => {
 
 system.put('/api/permissions', async (c) => {
   const body = await c.req.json();
+  const wait = requireOwner(c, { id: 'permissions.manifest', title: "Change what Mercury's shell, file and git tools may do" });
+  if (wait) return wait;
   const manager = new PermissionManager();
   const current = manager.getManifest();
   const next: PermissionsManifest = {
@@ -143,6 +203,13 @@ system.put('/api/permissions', async (c) => {
   };
   manager.save(next);
   return c.json({ success: true, manifest: next });
+});
+
+/** Day-by-day tokens for the activity heat map: ?days=1..1100 (default 371). */
+system.get('/api/usage/history', (c) => {
+  const parsed = parseInt(c.req.query('days') ?? '371', 10);
+  const days = Number.isFinite(parsed) ? Math.max(1, Math.min(1100, parsed)) : 371;
+  return c.json({ days: readHistory(days), since: historySince() });
 });
 
 system.get('/api/usage', (c) => {

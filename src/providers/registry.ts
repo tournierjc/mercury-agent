@@ -21,6 +21,10 @@ export async function createProvider(pc: ProviderConfig, tokenStore?: import('..
     // this entirely.
     const { OpenAICompatProvider } = await import('./openai-compat.js');
     return new OpenAICompatProvider(pc, { useChatApi: true });
+  } else if (pc.name === 'openrouter') {
+    // A gateway over Chat Completions: same client as the other compat providers, one key.
+    const { OpenAICompatProvider } = await import('./openai-compat.js');
+    return new OpenAICompatProvider(pc, { useChatApi: true });
   } else if (pc.name === 'aimlapi') {
     // OpenAI-compatible gateway. Chat Completions rather than Responses: the
     // catalogue is mostly third-party models reached through that surface.
@@ -75,6 +79,7 @@ export class ProviderRegistry {
       config.providers.anthropic,
       config.providers.grok,
       config.providers.atlascloud,
+      config.providers.runcrate,
       config.providers.ollamaCloud,
       config.providers.ollamaLocal,
       config.providers.atomicChat,
@@ -107,6 +112,27 @@ export class ProviderRegistry {
     }
 
     return registry;
+  }
+
+  /**
+   * Re-read providers from config in place: every holder of this registry
+   * (agent, bots, kanban, IDE) sees new keys and models on its next call,
+   * with no restart. Rejected keys get a fresh chance; the default follows
+   * config. Keeps the old set if the new config yields no provider at all.
+   */
+  async reload(config: MercuryConfig, tokenStore?: import('../cloud/token-store.js').CloudTokenStore | null): Promise<{ registered: string[] }> {
+    const next = await ProviderRegistry.create(config, tokenStore);
+    if (!next.hasProviders()) return { registered: [] };
+    const previous = this.providers;
+    this.providers = next.providers;
+    this.defaultName = config.providers.default;
+    this.lastSuccessful = null;
+    this.authFailed = undefined;
+    this.warnedUnusableDefault = false;
+    for (const [name, provider] of previous) {
+      if (this.providers.get(name) !== provider) (provider as BaseProvider & { destroy?: () => void }).destroy?.();
+    }
+    return { registered: [...this.providers.keys()] };
   }
 
   get(name?: string): BaseProvider | undefined {

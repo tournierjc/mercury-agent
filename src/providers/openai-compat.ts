@@ -1,7 +1,9 @@
 import { createOpenAI } from '@ai-sdk/openai';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { generateText, streamText } from 'ai';
+import type { LanguageModel } from 'ai';
 import { BaseProvider } from './base.js';
-import type { ProviderConfig } from '../utils/config.js';
+import type { ProviderConfig, ProviderTransport } from '../utils/config.js';
 import type { LLMResponse, LLMStreamChunk } from './base.js';
 import { logger } from '../utils/logger.js';
 import { aimlapiHeaders } from './aimlapi-attribution.js';
@@ -12,6 +14,47 @@ import { applyReasoningToBody, effectiveReasoning, providerHasReasoningControl }
  * Done on the wire because the AI SDK drops reasoningEffort for model ids it
  * doesn't recognise as reasoning models (every Ollama model, for one).
  */
+/**
+ * OpenRouter serves the same weights from many hosts. `routing` pins one: the
+ * gateway reads a `provider` block in the body (`order`, `quantizations`,
+ * `allow_fallbacks`), which the OpenAI SDK has no field for — so it is written
+ * on the wire, the same way the reasoning level above is.
+ *
+ * Only `openrouter` gets this: another gateway that happened to understand the
+ * key would be a coincidence, and sending it could be a hard 400.
+ */
+function withOpenRouterRouting(config: ProviderConfig): typeof fetch {
+  const routing = config.routing;
+  const order = routing?.order ?? [];
+  const quantizations = routing?.quantizations ?? [];
+  if (config.name !== 'openrouter' || (order.length === 0 && quantizations.length === 0)) {
+    return globalThis.fetch;
+  }
+  return async (input, init) => {
+    if (typeof init?.body === 'string') {
+      try {
+        const body = JSON.parse(init.body) as Record<string, unknown>;
+        body.provider = {
+          ...(order.length > 0 ? { order } : {}),
+          ...(quantizations.length > 0 ? { quantizations } : {}),
+          // A pinned endpoint that is down should fail loudly rather than be
+          // swapped for another host behind the caller's back.
+          allow_fallbacks: routing?.allowFallbacks ?? false,
+        };
+        init = { ...init, body: JSON.stringify(body) };
+      } catch { /* not JSON — pass through */ }
+    }
+    return globalThis.fetch(input, init);
+  };
+}
+
+/** One hook for the wire: routing when it applies, the reasoning level otherwise. */
+function openaiCompatFetch(config: ProviderConfig): typeof fetch | undefined {
+  if (providerHasReasoningControl(config.name)) return withReasoningPref(config.name);
+  const routed = withOpenRouterRouting(config);
+  return routed === globalThis.fetch ? undefined : routed;
+}
+
 function withReasoningPref(providerName: string): typeof fetch {
   return async (input, init) => {
     if (typeof init?.body === 'string') {
@@ -73,13 +116,37 @@ function openaiCompatFetch(config: ProviderConfig): typeof fetch | undefined {
 export class OpenAICompatProvider extends BaseProvider {
   readonly name: string;
   readonly model: string;
+  /** Which client this instance speaks through — read by the doctor and by tests. */
+  readonly transport: ProviderTransport;
   private client: ReturnType<typeof createOpenAI>;
-  private modelInstance: ReturnType<ReturnType<typeof createOpenAI>['languageModel']>;
+  private modelInstance: LanguageModel;
 
   constructor(config: ProviderConfig, { useChatApi }: { useChatApi?: boolean } = {}) {
     super(config);
     this.name = config.name;
     this.model = config.model;
+    this.transport = providerTransport(config);
+
+    const headers = aimlapiHeaders(config.baseUrl);
+    // Only providers with a reasoning control get the hook; the rest keep
+    // the SDK's default fetch untouched.
+    const fetchImpl = openaiCompatFetch(config);
+
+    if (this.transport === 'compatible') {
+      // The compatible client speaks Chat Completions only, so `useChatApi` has
+      // nothing to choose here — that surface is what it is.
+      const compatible = createOpenAICompatible({
+        name: config.name,
+        apiKey: config.apiKey || 'no-key',
+        baseURL: config.baseUrl,
+        headers,
+        fetch: fetchImpl,
+      });
+      this.client = createOpenAI({ apiKey: config.apiKey || 'no-key', baseURL: config.baseUrl, headers, fetch: fetchImpl });
+      this.modelInstance = compatible.chatModel(config.model);
+      logger.debug({ provider: config.name, model: config.model }, 'openai-compatible transport');
+      return;
+    }
 
     this.client = createOpenAI({
       apiKey: config.apiKey || 'no-key',

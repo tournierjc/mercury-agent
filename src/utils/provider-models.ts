@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ProviderConfig, ProviderName } from './config.js';
 import { fetchChatGPTModels } from '../auth/chatgpt-models.js';
 import { fetchGitHubModels } from '../auth/github-models.js';
@@ -58,6 +59,14 @@ const ATLASCLOUD_PREFERRED_MODELS = [
   'deepseek-ai/deepseek-v4-pro',
 ] as const;
 
+const RUNCRATE_PREFERRED_MODELS = [
+  'deepseek-ai/DeepSeek-V4.1-Flash',
+  'zai-org/GLM-5.3-Flash',
+  'zai-org/GLM-5.3',
+  'Qwen/Qwen3.8-Flash',
+  'moonshotai/Kimi-K2.6',
+] as const;
+
 const OLLAMA_CLOUD_PREFERRED_MODELS = [
   'gpt-oss:120b',
   'gpt-oss:120b-cloud',
@@ -88,6 +97,21 @@ const MIMO_PREFERRED_MODELS = [
 const MIMO_TOKEN_PLAN_PREFERRED_MODELS = MIMO_PREFERRED_MODELS;
 
 const OPENAI_COMPAT_PREFERRED_MODELS = [] as const;
+/**
+ * OpenRouter serves the same weights under namespaced ids and 404s on a bare
+ * `claude-sonnet-4.6`, so the picker seeds with lab-prefixed ids; the rest
+ * comes from `/models` at test time.
+ */
+const OPENROUTER_PREFERRED_MODELS = [
+  'anthropic/claude-sonnet-4.6',
+  'anthropic/claude-haiku-4.5',
+  'openai/gpt-5.1',
+  'openai/gpt-5.1-mini',
+  'google/gemini-3-pro',
+  'deepseek/deepseek-v3.2',
+  'qwen/qwen3.5-235b-a22b',
+  'mistralai/mistral-large-2',
+] as const;
 const LM_STUDIO_PREFERRED_MODELS = [] as const;
 const ATOMIC_CHAT_PREFERRED_MODELS = [] as const;
 
@@ -148,9 +172,11 @@ export function getPreferredModelsForProvider(provider: ProviderName): string[] 
     aimlapi: AIMLAPI_PREFERRED_MODELS,
     deepseek: DEEPSEEK_PREFERRED_MODELS,
     openai: OPENAI_PREFERRED_MODELS,
+    openrouter: OPENROUTER_PREFERRED_MODELS,
     anthropic: ANTHROPIC_PREFERRED_MODELS,
     grok: GROK_PREFERRED_MODELS,
     atlascloud: ATLASCLOUD_PREFERRED_MODELS,
+    runcrate: RUNCRATE_PREFERRED_MODELS,
     ollamaCloud: OLLAMA_CLOUD_PREFERRED_MODELS,
     ollamaLocal: OLLAMA_LOCAL_PREFERRED_MODELS,
     atomicChat: ATOMIC_CHAT_PREFERRED_MODELS,
@@ -240,8 +266,11 @@ function prioritizeModels(models: string[], preferred: readonly string[]): strin
   return [...preferredMatches, ...others];
 }
 
+/** Per-call cap: the CLI picker shows 50; the desktop Settings asks for every model. */
+const modelLimit = new AsyncLocalStorage<number>();
+
 function limitModels(models: string[]): string[] {
-  return models.slice(0, MAX_MODEL_OPTIONS);
+  return models.slice(0, modelLimit.getStore() ?? MAX_MODEL_OPTIONS);
 }
 
 function isOpenAIChatModel(id: string): boolean {
@@ -274,9 +303,11 @@ function chooseRecommendedModel(
     aimlapi: AIMLAPI_PREFERRED_MODELS,
     deepseek: DEEPSEEK_PREFERRED_MODELS,
     openai: OPENAI_PREFERRED_MODELS,
+    openrouter: OPENROUTER_PREFERRED_MODELS,
     anthropic: ANTHROPIC_PREFERRED_MODELS,
     grok: GROK_PREFERRED_MODELS,
     atlascloud: ATLASCLOUD_PREFERRED_MODELS,
+    runcrate: RUNCRATE_PREFERRED_MODELS,
     ollamaCloud: OLLAMA_CLOUD_PREFERRED_MODELS,
     ollamaLocal: OLLAMA_LOCAL_PREFERRED_MODELS,
     atomicChat: ATOMIC_CHAT_PREFERRED_MODELS,
@@ -303,12 +334,18 @@ function chooseRecommendedModel(
   return models[0];
 }
 
+/** Models that can't hold a conversation (rerankers, embedders, speech, images, moderation). */
+const NON_CHAT = /(^|[-_/.:])(rerank(er)?|embed(ding)?s?|whisper|tts|transcribe|moderation|dall-e|image-gen|text-to-speech|speech)([-_/.:]|$)/i;
+export function isChatModelId(id: string): boolean {
+  return !NON_CHAT.test(id);
+}
+
 export function buildModelCatalog(
   provider: ProviderName,
   models: string[],
   currentModel?: string,
 ): ProviderModelCatalog {
-  const filtered = uniq(models);
+  const filtered = uniq(models).filter(isChatModelId);
   if (filtered.length === 0) {
     throw new ProviderModelFetchError('Mercury could not find any supported chat models for this provider.');
   }
@@ -319,9 +356,11 @@ export function buildModelCatalog(
     aimlapi: AIMLAPI_PREFERRED_MODELS,
     deepseek: DEEPSEEK_PREFERRED_MODELS,
     openai: OPENAI_PREFERRED_MODELS,
+    openrouter: OPENROUTER_PREFERRED_MODELS,
     anthropic: ANTHROPIC_PREFERRED_MODELS,
     grok: GROK_PREFERRED_MODELS,
     atlascloud: ATLASCLOUD_PREFERRED_MODELS,
+    runcrate: RUNCRATE_PREFERRED_MODELS,
     ollamaCloud: OLLAMA_CLOUD_PREFERRED_MODELS,
     ollamaLocal: OLLAMA_LOCAL_PREFERRED_MODELS,
     atomicChat: ATOMIC_CHAT_PREFERRED_MODELS,
@@ -355,6 +394,8 @@ async function fetchOpenAICompatModels(provider: ProviderName, config: ProviderC
     errorMessage = 'Mercury could not fetch models for this Grok key. Please re-enter it.';
   } else if (provider === 'atlascloud') {
     errorMessage = 'Mercury could not fetch models for this Atlas Cloud key. Please re-enter it.';
+  } else if (provider === 'runcrate') {
+    errorMessage = 'Mercury could not fetch models for this Runcrate key. Please re-enter it.';
   } else if (provider === 'deepseek') {
     errorMessage = 'Mercury could not fetch models for this DeepSeek key. Please re-enter it.';
   } else if (provider === 'aimlapi') {
@@ -401,6 +442,11 @@ async function fetchOpenAICompatModels(provider: ProviderName, config: ProviderC
           && !lower.includes('audio')
           && !lower.includes('tts')
           && !lower.includes('whisper');
+      }
+      if (provider === 'runcrate') {
+        // Runcrate lists image, video, audio and embedding models on the same
+        // endpoint; each row says what it outputs.
+        return id.length > 0 && (outputModalities ?? []).includes('text');
       }
       return isOpenAIChatModel(id);
     })
@@ -570,7 +616,7 @@ async function fetchMercuryCloudModels(config: ProviderConfig): Promise<Provider
   const allModels = Array.isArray(data.data) ? data.data : [];
   const allowed = allModels.filter((m) => m.available === true).map((m) => m.id);
   const ids = allowed.length > 0 ? allowed : allModels.map((m) => m.id);
-  const models = uniq(ids);
+  const models = uniq(ids).filter(isChatModelId);
   return {
     recommendedModel: config.model && models.includes(config.model) ? config.model : models[0] || config.model || 'mercury-mini',
     models: limitModels(models.filter((model) => model !== config.model)),
@@ -580,7 +626,13 @@ async function fetchMercuryCloudModels(config: ProviderConfig): Promise<Provider
 export async function fetchProviderModelCatalog(
   provider: ProviderName,
   config: ProviderConfig,
+  opts: { limit?: number } = {},
 ): Promise<ProviderModelCatalog> {
+  if (opts.limit !== undefined) return modelLimit.run(Math.max(1, opts.limit), () => fetchCatalog(provider, config));
+  return fetchCatalog(provider, config);
+}
+
+async function fetchCatalog(provider: ProviderName, config: ProviderConfig): Promise<ProviderModelCatalog> {
   if (provider === 'mercuryCloud') {
     return fetchMercuryCloudModels(config);
   }
