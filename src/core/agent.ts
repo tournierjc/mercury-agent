@@ -100,7 +100,7 @@ import { compactConversation, memoryGovernorThresholds, memoryGovernorVerdict } 
 import { classifyStreamCompletion, isLengthTruncation, truncationContinuationPrompt, toolTruncationContinuationPrompt } from './stream-completion.js';
 import { MAX_EXECUTE_CONTINUATIONS, MAX_VERIFICATION_CONTINUATIONS, executeContinuationPrompt, shouldForceExecuteContinuation, isFailedToolResult, shouldRequireVerification, isVerificationOutputOk, verificationPrompt, responseAsksUser, EXECUTE_MUTATING_TOOLS, VERIFICATION_COMMAND_PATTERN, wakeUpPrompt } from './execute-guard.js';
 import { classifyTurnEnd, stepsExhaustedPrompt, STEPS_PAUSED_BANNER, WORK_NOT_STARTED_BANNER, VERIFICATION_FAILED_BANNER, type LoopEndCause } from './completion-verdict.js';
-import { HISTORY_TOKEN_BUDGET, HISTORY_TOKEN_BUDGET_SAVER, TOOL_TRACE_KIND, selectHistoryWindow, toModelMessage, withReasoningParts, formatToolTrace, formatToolTraceLine, summarizeToolArgs, summarizeToolResult, detectRepetitionLoop } from './context-window.js';
+import { HISTORY_TOKEN_BUDGET, HISTORY_TOKEN_BUDGET_SAVER, TOOL_TRACE_KIND, selectHistoryWindow, toModelMessage, withReasoningParts, formatToolTrace, formatToolTraceLine, formatContextCompressionReport, summarizeToolArgs, summarizeToolResult, detectRepetitionLoop } from './context-window.js';
 import { buildSystemPrompt as assembleSystemPrompt, budgetContext } from './system-prompt.js';
 import { buildStatusVerbPrompt, parseStatusVerbs, shouldRefreshStatusVerbs } from './status-verbs.js';
 import { verbPoolFor } from '../ui/status-word.js';
@@ -3204,6 +3204,33 @@ export class Agent {
               },
               ...recentMemory,
             ];
+          }
+          // The cut is an event, announced in the trace's own vocabulary: a
+          // `tool-call` entry whose one line reads like a `run_command` line,
+          // under its own header. Any client that draws a tool block draws it
+          // (and the compression stays in the session's own history).
+          this.sessions.appendMessage(canonicalSession.id, {
+            role: 'assistant',
+            kind: TOOL_TRACE_KIND,
+            content: formatContextCompressionReport(kept.report ?? { beforeTokens: 0, afterTokens: 0, removedTurns: 0 }, this.keeperForSession(canonicalSession.id).lastArchivedNumber),
+            externalMessageId: `${msg.id}:context-compression`,
+            metadata: {
+              channelType: msg.channelType,
+              channelId: msg.channelId,
+              event: 'context_compression',
+              ...(kept.report ? { contextCompression: kept.report } : {}),
+            },
+          });
+          // A live screen should see it happen, not only read it back: the
+          // web channel gets the same event as a notice on its SSE stream.
+          if (msg.channelType !== 'internal' && kept.report) {
+            const ch = this.channels.getChannelForMessage(msg);
+            if (ch instanceof WebChannel) {
+              ch.sendNotice(
+                `context_compression: ${kept.report.removedTurns} turns archived, ${kept.report.beforeTokens} → ${kept.report.afterTokens} tokens`,
+                msg.channelId,
+              );
+            }
           }
         } else {
           // notes_rejected: the gate refused the compression — send the

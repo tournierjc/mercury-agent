@@ -126,6 +126,32 @@ export function formatToolTraceLine(step: ToolTraceStep): string {
   return truncate(`- ${step.tool}${step.args ? ` ${step.args}` : ''} → ${step.outcome}`, TOOL_TRACE_LINE_CHARS);
 }
 
+/**
+ * The context compression event, in the trace's own vocabulary: a line of the
+ * same `- name args → outcome` shape as `run_command`, under a header the
+ * clients parse the way they parse the tool trace. It rides as its own session
+ * entry (`kind: "tool-call"`) at the moment the keeper cuts, so every client
+ * that draws a tool block draws the compression without knowing the keeper
+ * exists — same row grammar, own name and glyph.
+ */
+export const CONTEXT_COMPRESSION_HEADER = '[Context compression]';
+export const CONTEXT_COMPRESSION_TOOL = 'context_compression';
+
+export function formatContextCompressionReport(
+  report: { beforeTokens: number; afterTokens: number; removedTurns: number },
+  archivedThrough?: number,
+): string {
+  const through = archivedThrough === undefined ? '' : `, archived through turn ${archivedThrough}`;
+  return (
+    `${CONTEXT_COMPRESSION_HEADER}\n` +
+    formatToolTraceLine({
+      tool: CONTEXT_COMPRESSION_TOOL,
+      args: `${report.removedTurns} turns moved out`,
+      outcome: `${report.beforeTokens} → ${report.afterTokens} tokens (${report.removedTurns} archived${through})`,
+    })
+  );
+}
+
 /** The single session entry written at turn end summarising tool activity. */
 export function formatToolTrace(lines: readonly string[]): string {
   const kept = lines.length > TOOL_TRACE_MAX_LINES
