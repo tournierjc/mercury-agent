@@ -5187,6 +5187,17 @@ export class Agent {
     );
   }
 
+  /**
+   * Read the keeper switch from disk (mercury.yaml, the same saveConfig the
+   * settings routes use) and apply it to the live config: the switch is
+   * consulted per turn, so this makes it live without a restart. The keeper
+   * state on disk survives a flip off and on.
+   */
+  setKeeperEnabled(enabled: boolean): void {
+    this.config.tokens = this.config.tokens ?? {};
+    this.config.tokens.keeper = { ...this.config.tokens.keeper, enabled };
+  }
+
   private learningProviders(): { getDefault(): ReturnType<ProviderRegistry['getDefault']> } {
     return {
       getDefault: () => {

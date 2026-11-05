@@ -34,6 +34,7 @@ const snapshotBody = {
 
 let controls: ContextControls;
 let busy = false;
+let keeperOn = true;
 let compressOutcome: { outcome: string; report?: { beforeTokens: number; afterTokens: number; removedTurns: number } } =
   { outcome: 'cut', report: { beforeTokens: 9500, afterTokens: 4100, removedTurns: 6 } };
 
@@ -54,6 +55,8 @@ beforeEach(() => {
       return { turns: 14, hits: query ? [`turn 3 (user): the codename is ${query}`].slice(0, limit) : [] };
     },
     busy: () => busy,
+    keeperEnabled: () => keeperOn,
+    setKeeperEnabled: (on) => { keeperOn = on; },
   };
   setContextControls(controls);
 });
@@ -110,6 +113,25 @@ describe('/api/context/threads/:id/compress', () => {
 
   it('404s a thread that does not exist', async () => {
     expect((await post('/api/context/threads/missing/compress')).status).toBe(404);
+  });
+});
+
+describe('/api/context (the keeper switch)', () => {
+  it('reports and flips the master switch live', async () => {
+    expect(((await (await get('/api/context')).json()) as Record<string, unknown>).enabled).toBe(true);
+    const off = await context.request('http://127.0.0.1/api/context', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }),
+    });
+    expect(await off.json()).toEqual({ enabled: false });
+    expect(keeperOn).toBe(false);
+    expect(((await (await get('/api/context')).json()) as Record<string, unknown>).enabled).toBe(false);
+  });
+
+  it('rejects a body that is not a boolean', async () => {
+    const res = await context.request('http://127.0.0.1/api/context', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: 'yes' }),
+    });
+    expect(res.status).toBe(400);
   });
 });
 

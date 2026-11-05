@@ -3583,6 +3583,14 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
       return { turns: keeper.archivedCount, hits: keeper.recall(query, limit) };
     },
     busy: (sessionId) => agent.isBusyWith(sessionId),
+    keeperEnabled: () => !!config.tokens?.keeper?.enabled,
+    setKeeperEnabled: (enabled) => {
+      const fresh = loadConfig();
+      fresh.tokens = fresh.tokens ?? {};
+      fresh.tokens.keeper = { ...fresh.tokens.keeper, enabled };
+      saveConfig(fresh);
+      agent.setKeeperEnabled(enabled);
+    },
   });
   // Updates wait for running work: a reply, queued messages, bot turns.
   {

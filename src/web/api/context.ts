@@ -29,6 +29,9 @@ export interface ContextControls {
   compress: (sessionId: string) => Promise<{ outcome: string; report?: unknown }>;
   recall: (sessionId: string, query: string, limit: number) => { turns: number; hits: string[] };
   busy: (sessionId: string) => boolean;
+  /** The master switch (config `tokens.keeper.enabled`) — GET and PUT, live. */
+  keeperEnabled: () => boolean;
+  setKeeperEnabled: (enabled: boolean) => void;
 }
 
 let controls: ContextControls | undefined;
@@ -38,6 +41,27 @@ function notFound(c: { json: (b: unknown, s?: number) => Response }, err: unknow
   if (err instanceof Error && /not found/i.test(err.message)) return c.json({ error: 'Thread not found' }, 404);
   return null;
 }
+
+/**
+ * The keeper switch, readable and settable like the budgets: the same key as
+ * `tokens.keeper.enabled` in mercury.yaml, saved live AND applied to the
+ * running agent (the switch is consulted per turn — no restart).
+ *
+ *   GET /api/context        → { enabled }
+ *   PUT /api/context        { enabled: true|false } → { enabled }
+ */
+context.get('/api/context', (c) => {
+  if (!controls) return c.json({ error: 'Context inspector is not available on this runtime' }, 503);
+  return c.json({ enabled: controls.keeperEnabled() });
+});
+
+context.put('/api/context', async (c) => {
+  if (!controls) return c.json({ error: 'Context inspector is not available on this runtime' }, 503);
+  const body = await c.req.json().catch(() => ({} as Record<string, unknown>));
+  if (typeof body.enabled !== 'boolean') return c.json({ error: 'enabled must be true or false.' }, 400);
+  controls.setKeeperEnabled(body.enabled);
+  return c.json({ enabled: controls.keeperEnabled() });
+});
 
 context.get('/api/context/threads/:id', (c) => {
   if (!controls) return c.json({ error: 'Context inspector is not available on this runtime' }, 503);
