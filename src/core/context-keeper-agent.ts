@@ -15,7 +15,7 @@ import { generateText } from 'ai';
 import { getMercuryHome } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
 import { ContextKeeper, type KeeperTurn, type NotesWriter } from './context-keeper.js';
-import { parseDelta, type Notes } from './context-notes.js';
+import { parseDelta, renderNotes, type Notes } from './context-notes.js';
 import { HISTORY_TOKEN_BUDGET, HISTORY_TOKEN_BUDGET_SAVER } from './context-window.js';
 import type { SessionMessage } from '../sessions/types.js';
 import type { BaseProvider } from '../providers/base.js';
@@ -136,4 +136,71 @@ export function keeperFor(sessionId: string, saverActive: boolean): ContextKeepe
     budget: saverActive ? KEEPER_BUDGET_SAVER : KEEPER_BUDGET,
     stateDir: keeperStateDir(sessionId),
   });
+}
+
+/** What the web API exposes for one conversation — see GET /api/context. */
+export interface ContextSnapshot {
+  enabled: boolean;
+  saverActive: boolean;
+  budget: number;
+  /** Estimated tokens the whole history would cost (keeper view excluded). */
+  historyTokens: number;
+  /** Estimated tokens the kept view costs right now. */
+  viewTokens: number;
+  needsCompression: boolean;
+  cuts: number;
+  archivedTurns: number;
+  /** How far the archive goes (last archived turn number). */
+  archivedThrough: number;
+  lastReport: { beforeTokens: number; afterTokens: number; removedTurns: number } | null;
+  notes: { rules: string[]; state: Array<{ name: string; value: string }>; open: string[] };
+  notesText: string;
+}
+
+/**
+ * A read-only look at one conversation's context through the keeper: what the
+ * model sees, what lives in the archive, and the notes as they stand. Builds a
+ * keeper over the session's persisted state — no model call, no mutation.
+ */
+export function snapshotContext(
+  keeper: ContextKeeper,
+  messages: readonly SessionMessage[],
+  enabled: boolean,
+  saverActive: boolean,
+): ContextSnapshot {
+  const turns = turnsOfSession(messages);
+  const view = keeper.viewFor(turns);
+  const cost = (ts: KeeperTurn[]): number => ts.reduce((s, t) => s + Math.ceil(t.content.length / 4), 0);
+  const notes = keeper.currentNotes();
+  const report = keeper.lastReport;
+  return {
+    enabled,
+    saverActive,
+    budget: saverActive ? KEEPER_BUDGET_SAVER : KEEPER_BUDGET,
+    historyTokens: cost(turns),
+    viewTokens: cost(view),
+    needsCompression: keeper.needsCompression(turns),
+    cuts: keeper.cuts,
+    archivedTurns: keeper.archivedCount,
+    archivedThrough: keeper.lastArchivedNumber,
+    lastReport: report
+      ? { beforeTokens: report.beforeTokens, afterTokens: report.afterTokens, removedTurns: report.removedTurns }
+      : null,
+    notes: { rules: notes.rules, state: notes.state, open: notes.open },
+    notesText: renderNotes(notes),
+  };
+}
+
+/**
+ * Force a cut now, the way the turn loop would: notes first, archive verbatim,
+ * the gate refuses anything that does not strictly shrink the view. Returns the
+ * same vocabulary as {@link selectKeeperHistory} so the API can report why a
+ * compression did not happen (`fits` / `too_short` / `notes_rejected`).
+ */
+export async function compressNow(
+  keeper: ContextKeeper,
+  messages: readonly SessionMessage[],
+  writer: NotesWriter,
+): Promise<KeeperSelection> {
+  return selectKeeperHistory(keeper, turnsOfSession(messages), writer);
 }

@@ -16,6 +16,7 @@ import cloudRoutes from './api/cloud.js';
 import transcribeRoutes from './api/transcribe.js';
 import speakRoutes from './api/speak.js';
 import budgetRoutes, { setBudgetControls } from './api/budget.js';
+import contextRoutes, { setContextControls } from './api/context.js';
 import channelRoutes from './api/channels.js';
 import artifactRoutes from './api/artifacts.js';
 import configRoutes from './api/config.js';
@@ -42,6 +43,7 @@ import { isBetterSqlite3Available } from '../memory/second-brain-db.js';
 
 export { setSessionRepository };
 export { setBudgetControls };
+export { setContextControls };
 export { setSessionSyncEnabledCallback };
 
 const app = new Hono();
@@ -121,6 +123,7 @@ app.route('/', cloudRoutes);
 app.route('/', transcribeRoutes);
 app.route('/', speakRoutes);
 app.route('/', budgetRoutes);
+app.route('/', contextRoutes);
 app.route('/', channelRoutes);
 app.route('/', artifactRoutes);
 app.route('/', configRoutes);

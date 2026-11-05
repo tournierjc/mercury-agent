@@ -90,7 +90,7 @@ import {
 import { fetchProviderModelCatalog, getPreferredModelsForProvider } from '../utils/provider-models.js';
 import { WorkLedger, type WorkEntry } from './work-ledger.js';
 import { ContextKeeper } from './context-keeper.js';
-import { keeperFor, makeNotesWriter, selectKeeperHistory, turnsOfSession } from './context-keeper-agent.js';
+import { keeperFor, makeNotesWriter, selectKeeperHistory, turnsOfSession, snapshotContext, compressNow, type ContextSnapshot, type KeeperSelection } from './context-keeper-agent.js';
 import type { SessionMessage } from '../sessions/types.js';
 import { MAX_PROVIDER_ATTEMPT_MS, MAX_AUTOMATIC_CONTINUATIONS, needsContinuationApproval, needsRetryApproval, withAbortDeadline } from './execution-limits.js';
 import { requiresFinalSend } from './response-delivery.js';
@@ -5121,6 +5121,44 @@ export class Agent {
     return keeper;
   }
   private readonly keepers = new Map<string, ContextKeeper>();
+
+  /**
+   * The context state of one conversation for the web API (GET /api/context):
+   * the same live keeper the turn loop uses, read without touching it.
+   */
+  keeperForInspection(sessionId: string): ContextKeeper {
+    return this.keeperForSession(sessionId);
+  }
+
+  contextSnapshot(sessionId: string): ContextSnapshot {
+    const session = this.sessions.get(sessionId);
+    return snapshotContext(
+      this.keeperForSession(session.id),
+      session.messages,
+      !!this.config.tokens?.keeper?.enabled,
+      this.saverMode.isActive(),
+    );
+  }
+
+  /**
+   * Force a keeper cut now for one conversation (POST /api/context/compress):
+   * notes first, archive verbatim, and the gate — a cut that would not
+   * strictly shrink the view is refused and nothing changes.
+   */
+  async compressSessionContext(sessionId: string): Promise<KeeperSelection> {
+    const session = this.sessions.get(sessionId);
+    return compressNow(
+      this.keeperForSession(session.id),
+      session.messages,
+      makeNotesWriter(() => {
+        try {
+          return this.learningProviders().getDefault().getModelInstance();
+        } catch {
+          return null;
+        }
+      }),
+    );
+  }
 
   private learningProviders(): { getDefault(): ReturnType<ProviderRegistry['getDefault']> } {
     return {

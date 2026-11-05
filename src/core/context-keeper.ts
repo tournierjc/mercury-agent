@@ -166,6 +166,12 @@ export class ContextKeeper {
     return this.archive.size;
   }
 
+  /** The number of the last archived turn (-1 when the archive is empty). */
+  get lastArchivedNumber(): number {
+    const all = this.archive.all();
+    return all.length ? all[all.length - 1]!.number : -1;
+  }
+
   currentNotes(): Notes {
     return this.notes;
   }
