@@ -263,6 +263,16 @@ export interface MercuryConfig {
     saverAutoEnabled?: boolean;
     /** Lifetime estimated tokens saved by saver mode (informational). */
     saverTokensSavedLifetime?: number;
+    /**
+     * The context keeper (skindeepai/ctxkeeper policy): budgeted history with
+     * model-written notes and a verbatim archive, replacing the plain sliding
+     * window when a conversation overruns the budget. A cut that does not
+     * strictly shrink the view is refused, and the full history is sent
+     * instead. Off by default until the owner turns it on.
+     */
+    keeper?: {
+      enabled?: boolean;
+    };
   };
   subagents: {
     enabled: boolean;

@@ -6,6 +6,7 @@ import {
   TOOL_TRACE_KIND,
   detectRepetitionLoop,
   formatToolTrace,
+  formatContextCompressionReport,
   formatToolTraceLine,
   selectHistoryWindow,
   summarizeToolArgs,
@@ -118,5 +119,19 @@ describe('tool trace formatting', () => {
     expect(trace.startsWith('[Tool activity in my previous turn]')).toBe(true);
     expect(trace.split('\n')).toHaveLength(41);
     expect(trace).toContain('21 more tool calls');
+  });
+
+  it('writes the context compression as one trace line under its own header', () => {
+    const event = formatContextCompressionReport({ beforeTokens: 9500, afterTokens: 4100, removedTurns: 6 }, 13);
+    expect(event.startsWith('[Context compression]')).toBe(true);
+    const [header, line, ...rest] = event.split('\n');
+    expect(header).toBe('[Context compression]');
+    expect(rest).toHaveLength(0);
+    // The same `- name args → outcome` grammar as run_command's lines.
+    expect(line.startsWith('- context_compression ')).toBe(true);
+    expect(line).toContain(' → ');
+    expect(line).toContain('6 turns moved out');
+    expect(line).toContain('9500 → 4100 tokens');
+    expect(line).toContain('archived through turn 13');
   });
 });

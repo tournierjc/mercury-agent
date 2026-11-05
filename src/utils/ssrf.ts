@@ -15,7 +15,13 @@
 
 import { lookup } from 'node:dns';
 import { isIP } from 'node:net';
-import { Agent } from 'undici';
+import { Agent, fetch as undiciFetch } from 'undici';
+
+// Vitest's environment installs an undici-derived `fetch` global that cannot
+// accept a `dispatcher` init (it throws `invalid onError method` on dispatch),
+// so every guarded request goes through the vendored undici `fetch` itself.
+// Same library, same version, same dispatcher contract as production Node.
+const dispatchFetch: typeof globalThis.fetch = undiciFetch as unknown as typeof globalThis.fetch;
 
 const DEFAULT_HEADERS = {
   'User-Agent': 'Mercury-Agent/0.1.0',
@@ -204,7 +210,7 @@ export async function guardedFetch(rawUrl: string, signal: AbortSignal, headers?
         headers: headers ?? DEFAULT_HEADERS,
         dispatcher: guardedAgent,
       };
-      const resp = await fetch(url, init);
+      const resp = await dispatchFetch(url, init);
       if (resp.status >= 300 && resp.status < 400) {
         const location = resp.headers.get('location');
         if (location) {
@@ -269,7 +275,7 @@ export function createGuardedFetch(options: { allowPrivate?: boolean; privateHin
     if (pinned) guardedFetchPins.acquire(host, pinned);
     try {
       const guardedInit: FetchInitWithDispatcher = { ...init, redirect: 'manual', dispatcher: guardedFetchAgent };
-      return await fetch(url, guardedInit);
+      return await dispatchFetch(url, guardedInit);
     } finally {
       if (pinned) guardedFetchPins.release(host);
     }

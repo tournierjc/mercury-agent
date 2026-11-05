@@ -275,11 +275,15 @@ describe('planArgvExecution', () => {
 
     it('resolves an installed binary the lane used to call missing', () => {
       withToolsDir((bin) => {
-        const gh = join(bin, 'gh');
-        writeFileSync(gh, '#!/bin/sh\nexit 0\n');
-        chmodSync(gh, 0o755);
+        // Unique name: the resolver walks the system dirs first, and a CI
+        // image that ships a real `gh` at /usr/bin would answer before the
+        // installed one is ever consulted.
+        const prog = 'gh-mercury-installed-test';
+        const installed = join(bin, prog);
+        writeFileSync(installed, '#!/bin/sh\nexit 0\n');
+        chmodSync(installed, 0o755);
 
-        expect(resolveFromDirs('gh', pinnedSearchDirs('linux'))).toBe(gh);
+        expect(resolveFromDirs(prog, pinnedSearchDirs('linux'))).toBe(realpathSync(installed));
       });
     });
   });
