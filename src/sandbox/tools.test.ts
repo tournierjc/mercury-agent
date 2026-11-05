@@ -227,7 +227,8 @@ describe('installing', () => {
 
     expect(record.state).toBe('done');
     // No apt, no root: one gzipped binary, unpacked with python3 (the image has no xz).
-    expect(script).toContain('ffmpeg-linux-arm64.gz');
+    // The asset name follows the runner's architecture (CI runs x64 and arm64).
+    expect(script).toContain(`ffmpeg-linux-${process.arch === 'arm64' ? 'arm64' : 'x64'}.gz`);
     expect(script).not.toContain('apt-get');
     expect(script).toContain('gzip.open');
   });
