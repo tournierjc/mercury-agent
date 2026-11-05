@@ -122,6 +122,7 @@ import { formatCounts, formatLearnedLine } from './commands/memory-commands.js';
 import { handleBgCommand as handleBgCommandImpl } from './commands/bg-command.js';
 import { handleSaverCommand as handleSaverCommandImpl } from './commands/saver-command.js';
 import { handleSessionCommand as handleSessionCommandImpl } from './commands/session-command.js';
+import { handleCompactCommand as handleCompactCommandImpl } from './commands/compact-command.js';
 import { handleFastPathCommand as handleFastPathCommandImpl } from './commands/fast-path-command.js';
 import { openCliMemoryMenu as openCliMemoryMenuImpl } from './commands/cli-memory-menu.js';
 import { openMemoryChoiceMenu as openMemoryChoiceMenuImpl } from './commands/memory-choice-menu.js';
@@ -5936,6 +5937,29 @@ Is this productive iteration or a stuck loop?`,
 
   async handleSessionCommand(content: string, channelType: ChannelType, channelId: string): Promise<void> {
     return handleSessionCommandImpl(this, content, channelType, channelId);
+  }
+
+  /**
+   * The keeper switch from `/compact on|off`: live on the running agent (the
+   * switch is consulted per turn) and written to mercury.yaml, so it survives
+   * the next restart — the same contract as PUT /api/context.
+   */
+  setKeeperEnabled(enabled: boolean): void {
+    this.config.tokens = this.config.tokens ?? {};
+    this.config.tokens.keeper = { ...this.config.tokens.keeper, enabled };
+    try {
+      const fresh = loadConfig();
+      fresh.tokens = fresh.tokens ?? {};
+      fresh.tokens.keeper = { ...fresh.tokens.keeper, enabled };
+      saveConfig(fresh);
+    } catch (err) {
+      logger.warn({ err }, 'keeper switch: could not persist to mercury.yaml');
+    }
+  }
+
+  /** `/compact` — the context gauge, a manual keeper cut, the keeper switch. */
+  async handleCompactCommand(msg: ChannelMessage): Promise<void> {
+    return handleCompactCommandImpl(this, msg);
   }
 
   private scheduleSessionTitleGeneration(sessionId: string, providerName: string): void {
