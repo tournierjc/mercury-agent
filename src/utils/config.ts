@@ -343,6 +343,14 @@ export interface MercuryConfig {
     enabled: boolean;
     port: number;
     /**
+     * Interface the dashboard binds. Default `127.0.0.1` — the socket stays
+     * loopback and remote devices arrive through a local tunnel (Tailscale
+     * Serve). Only set this on a trusted network: the DNS-rebinding host
+     * check and the auth guard still apply, but the port becomes reachable
+     * by everything that can route to this machine.
+     */
+    host?: string;
+    /**
      * Extra browser origins allowed to call /api/* with a Bearer token
      * (CORS). Mercury Desktop's own origins are always allowed; list a
      * self-hosted web build or a dev server here. Never '*'.
@@ -729,6 +737,7 @@ export function getDefaultConfig(): MercuryConfig {
     web: {
       enabled: getEnvBool('MERCURY_WEB_ENABLED', false),
       port: getEnvNum('MERCURY_PORT', 6174),
+      host: getEnv('MERCURY_WEB_HOST', '') || undefined,
     },
   };
 }

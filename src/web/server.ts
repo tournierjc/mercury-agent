@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { logger } from '../utils/logger.js';
 import { authGuard, errorHandler } from './middleware.js';
 import { apiCors } from './cors.js';
-import { initWebAuth, getWebPort } from './auth.js';
+import { initWebAuth, getWebPort, getWebHost } from './auth.js';
 import { loadConfig } from '../utils/config.js';
 import authRoutes from './api/auth.js';
 import statusRoutes, { updateStatus } from './api/status.js';
@@ -301,6 +301,7 @@ process.on('unhandledRejection', (reason: any) => {
 
 export function startWebServer(): { port: number; url: string } {
   const port = getWebPort();
+  const host = getWebHost();
   initWebAuth();
   // Devices from before idle expiry start their clock now (they keep working).
   try { migrateDevices(); } catch { /* checked again next start */ }
@@ -320,7 +321,7 @@ export function startWebServer(): { port: number; url: string } {
       // A previous instance shutting down keeps the port for a moment;
       // retry before declaring the dashboard unavailable.
       bindAttempts++;
-      setTimeout(() => server.listen(port, '127.0.0.1'), 500);
+      setTimeout(() => server.listen(port, host), 500);
       return;
     }
     if (err?.code === 'EADDRINUSE') {
@@ -333,8 +334,8 @@ export function startWebServer(): { port: number; url: string } {
     }
   });
 
-  server.listen(port, '127.0.0.1', () => {
-    logger.info(`Web dashboard: http://127.0.0.1:${port}`);
+  server.listen(port, host, () => {
+    logger.info(`Web dashboard: http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`);
   });
 
   return { port, url: `http://127.0.0.1:${port}` };

@@ -7,6 +7,7 @@ import type { Tool } from 'ai';
 import type { ChannelAttachment } from '../types/channel.js';
 import type { MercuryConfig } from '../utils/config.js';
 import type { ProviderRegistry } from '../providers/registry.js';
+import type { BaseProvider } from '../providers/base.js';
 import type { TokenBudget } from '../utils/tokens.js';
 import type { CapabilityRegistry } from '../capabilities/registry.js';
 import type { UserMemoryStore } from '../memory/user-memory.js';
@@ -2484,7 +2485,26 @@ function resolveProvider(providers: ProviderRegistry, manifest: BotManifest, con
   const requested = manifest.model?.provider;
   const getUsable = typeof providers.getUsable === 'function' ? providers.getUsable.bind(providers) : (name?: string) => (name ? providers.get(name) : undefined);
   const provider = getUsable(requested);
-  if (provider) return provider;
+  // A slug override rides on the chosen provider: `model.model` said one thing
+  // to the owner in the edit UI, and it must be what answers. Only providers
+  // that build their model lazily enough to honour it (the compat clients);
+  // the rest keep their configured model rather than lie about it.
+  const withSlug = (p: BaseProvider): BaseProvider => {
+    const slug = manifest.model?.model?.trim();
+    if (!slug || slug === p.getModel()) return p;
+    const cloner = (p as unknown as { withModel?: (slug: string) => BaseProvider }).withModel;
+    if (typeof cloner !== 'function') {
+      logger.warn({ botId: manifest.id, provider: p.name, slug }, 'Bot model slug ignored — this provider serves only its configured model');
+      return p;
+    }
+    try {
+      return cloner.call(p, slug);
+    } catch (err) {
+      logger.warn({ botId: manifest.id, provider: p.name, slug, err: (err as Error)?.message }, 'Bot model slug clone failed — keeping the configured model');
+      return p;
+    }
+  };
+  if (provider) return withSlug(provider);
   if (requested) {
     logger.warn({ botId: manifest.id, requested }, 'Bot provider not registered or not usable (no key / key rejected) — falling back to default');
   }
@@ -2492,7 +2512,7 @@ function resolveProvider(providers: ProviderRegistry, manifest: BotManifest, con
   // config names one and the crew bot has no choice of its own.
   const crewProvider = manifest.parent ? config?.bots?.fleets?.crewProvider : undefined;
   const crewLane = getUsable(crewProvider);
-  if (crewLane) return crewLane;
+  if (crewLane) return withSlug(crewLane);
   return providers.getDefault();
 }
 

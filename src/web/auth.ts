@@ -37,6 +37,22 @@ export function getWebPort(): number {
   return 6174;
 }
 
+/**
+ * Bind interface: loopback unless the owner asks otherwise. `MERCURY_WEB_HOST`
+ * or `web.host` open the socket to a network (e.g. `0.0.0.0` for a tailnet);
+ * the DNS-rebinding host check and the auth guard still stand behind it.
+ */
+export function getWebHost(): string {
+  const envHost = (process.env.MERCURY_WEB_HOST || '').trim();
+  if (envHost) return envHost;
+  try {
+    const config = loadConfig();
+    const host = (config.web?.host || '').trim();
+    if (host) return host;
+  } catch {}
+  return '127.0.0.1';
+}
+
 const ATTACH_TOKEN_FILE = 'attach-token';
 
 function getAttachTokenPath(): string {

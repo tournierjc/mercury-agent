@@ -214,4 +214,17 @@ export class OpenAICompatProvider extends BaseProvider {
   getModelInstance(): any {
     return this.modelInstance;
   }
+
+  /**
+   * A copy of this endpoint answering as `slug` — same key, same baseUrl,
+   * same transport. The bot editor lets an owner name any model on the
+   * endpoint; the clone is how that promise survives to the wire.
+   */
+  withModel(slug: string): OpenAICompatProvider {
+    const clone = new OpenAICompatProvider(
+      { ...this.config, model: slug },
+      { useChatApi: this.transport !== 'compatible' },
+    );
+    return clone;
+  }
 }
