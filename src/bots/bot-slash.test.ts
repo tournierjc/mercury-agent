@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { answerBotSlashCommand } from './bot-slash.js';
+import { answerBotSlashCommand, answerCompactForBot } from './bot-slash.js';
 
 /**
- * Slash commands in a bot thread are answered by the daemon, not by a bot
- * turn: the bot's context is fresh every run, so only the agent's keeper
- * state holds a real gauge. The manager hook must answer recognized commands
- * into the thread and let everything else fall through to the model.
+ * Slash commands in a bot conversation are answered by the daemon, not by a
+ * bot turn: the bot's context is fresh every run, so only the agent's keeper
+ * state holds a real gauge. The hook must answer recognized commands into the
+ * thread and let everything else fall through to the model.
  */
 
 const agentStub = (overrides: Partial<Record<string, any>> = {}) => ({
@@ -17,17 +17,23 @@ const agentStub = (overrides: Partial<Record<string, any>> = {}) => ({
     historyTokens: 74_000, viewTokens: 74_000, needsCompression: false,
     cuts: 0, archivedTurns: 0,
   })),
-  sessions: { getByBinding: vi.fn(() => ({ id: 'sess-bot-1' })) },
+  sessions: {
+    getByBinding: vi.fn(() => ({ id: 'sess-bot-1' })),
+    getOrCreateBound: vi.fn(() => ({ id: 'sess-bot-1' })),
+  },
   ...overrides,
 }) as any;
 
-const managerStub = {} as any;
+const managerStub = (names: string[] = ['smith']) => ({
+  resolveBotId: (id: string) => (names.includes(id) ? id : null),
+  notifyBotThread: vi.fn(async (_botId: string, _message: string) => {}),
+}) as any;
 
 describe('answerBotSlashCommand', () => {
   it('answers /compact with the thread session gauge', async () => {
     const agent = agentStub();
-    const deliver = vi.fn(async () => {});
-    const answered = await answerBotSlashCommand(agent, managerStub, 'smith', '/compact', deliver);
+    const deliver = vi.fn(async (_m: string) => {});
+    const answered = await answerBotSlashCommand(agent, managerStub(), 'smith', '/compact', deliver);
     expect(answered).toBe(true);
     expect(agent.sessions.getByBinding).toHaveBeenCalledWith('cli', 'bot:smith');
     expect(agent.contextSnapshot).toHaveBeenCalledWith('sess-bot-1');
@@ -43,42 +49,79 @@ describe('answerBotSlashCommand', () => {
         report: { beforeTokens: 190_000, afterTokens: 60_000, removedTurns: 12 },
       })),
     });
-    const deliver = vi.fn(async () => {});
-    expect(await answerBotSlashCommand(agent, managerStub, 'smith', '/compact now', deliver)).toBe(true);
+    const deliver = vi.fn(async (_m: string) => {});
+    expect(await answerBotSlashCommand(agent, managerStub(), 'smith', '/compact now', deliver)).toBe(true);
     expect(agent.compressSessionContext).toHaveBeenCalledWith('sess-bot-1');
     expect(deliver.mock.calls[0][0]).toContain('Compressed');
   });
 
   it('the keeper switch answers without touching a session', async () => {
     const agent = agentStub();
-    const deliver = vi.fn(async () => {});
-    expect(await answerBotSlashCommand(agent, managerStub, 'smith', '/compact off', deliver)).toBe(true);
+    const deliver = vi.fn(async (_m: string) => {});
+    expect(await answerBotSlashCommand(agent, managerStub(), 'smith', '/compact off', deliver)).toBe(true);
     expect(agent.setKeeperEnabled).toHaveBeenCalledWith(false);
     expect(agent.sessions.getByBinding).not.toHaveBeenCalled();
   });
 
-  it('/help lists the bot-thread commands', async () => {
-    const deliver = vi.fn(async () => {});
-    expect(await answerBotSlashCommand(agentStub(), managerStub, 'smith', '/help', deliver)).toBe(true);
+  it('/help lists the answered commands', async () => {
+    const deliver = vi.fn(async (_m: string) => {});
+    expect(await answerBotSlashCommand(agentStub(), managerStub(), 'smith', '/help', deliver)).toBe(true);
     expect(deliver.mock.calls[0][0]).toContain('/compact');
   });
 
   it('unknown slash commands fall through to the turn', async () => {
-    const deliver = vi.fn(async () => {});
-    expect(await answerBotSlashCommand(agentStub(), managerStub, 'smith', '/bots list', deliver)).toBe(false);
+    const deliver = vi.fn(async (_m: string) => {});
+    expect(await answerBotSlashCommand(agentStub(), managerStub(), 'smith', '/bots list', deliver)).toBe(false);
     expect(deliver).not.toHaveBeenCalled();
   });
 
   it('a plain message is never answered here', async () => {
-    const deliver = vi.fn(async () => {});
-    expect(await answerBotSlashCommand(agentStub(), managerStub, 'smith', 'digest stp', deliver)).toBe(false);
+    const deliver = vi.fn(async (_m: string) => {});
+    expect(await answerBotSlashCommand(agentStub(), managerStub(), 'smith', 'digest stp', deliver)).toBe(false);
     expect(deliver).not.toHaveBeenCalled();
   });
 
   it('an empty thread answers instead of crashing', async () => {
-    const agent = agentStub({ sessions: { getByBinding: vi.fn(() => null) } });
-    const deliver = vi.fn(async () => {});
-    expect(await answerBotSlashCommand(agent, managerStub, 'smith', '/compact', deliver)).toBe(true);
+    const agent = agentStub({ sessions: { getByBinding: vi.fn(() => null), getOrCreateBound: vi.fn(() => ({ id: 'x' })) } });
+    const deliver = vi.fn(async (_m: string) => {});
+    expect(await answerBotSlashCommand(agent, managerStub(), 'smith', '/compact', deliver)).toBe(true);
     expect(deliver.mock.calls[0][0]).toContain('No context recorded');
+  });
+});
+
+describe('answerCompactForBot', () => {
+  it('/compact <bot> answers with that bot gauge, to its thread and the requester', async () => {
+    const agent = agentStub();
+    const manager = managerStub(['smith', 'watcher']);
+    expect(await answerCompactForBot(agent, manager, 'smith', '/compact watcher')).toBe(true);
+    const [targetThread, gauge] = manager.notifyBotThread.mock.calls[0];
+    expect(targetThread).toBe('watcher');
+    expect(gauge).toContain('37%');
+    const [requester, echoed] = manager.notifyBotThread.mock.calls[1];
+    expect(requester).toBe('smith');
+    expect(echoed).toContain('/compact watcher');
+  });
+
+  it('a target that is not a bot is a task, not a command', async () => {
+    const manager = managerStub(['smith']);
+    expect(await answerCompactForBot(agentStub(), manager, 'smith', '/compact le rapport svp')).toBe(false);
+    expect(manager.notifyBotThread).not.toHaveBeenCalled();
+  });
+
+  it('an unknown sub-argument stays a task', async () => {
+    const manager = managerStub(['smith', 'watcher']);
+    expect(await answerCompactForBot(agentStub(), manager, 'smith', '/compact watcher xyz')).toBe(false);
+  });
+
+  it('/compact <bot> now cuts that bot session', async () => {
+    const agent = agentStub({
+      compressSessionContext: vi.fn(async () => ({
+        outcome: 'cut',
+        report: { beforeTokens: 190_000, afterTokens: 40_000, removedTurns: 9 },
+      })),
+    });
+    const manager = managerStub(['smith', 'watcher']);
+    expect(await answerCompactForBot(agent, manager, 'smith', '/compact watcher now')).toBe(true);
+    expect(agent.compressSessionContext).toHaveBeenCalledWith('sess-bot-1');
   });
 });

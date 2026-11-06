@@ -469,29 +469,67 @@ export class BotManager {
   async answerSlash(botId: string, text: string, source?: { channelType: string; channelId: string }): Promise<boolean> {
     if (!this.getSlashHook || !text.trim().startsWith('/')) return false;
     const thread = `bot:${botId}`;
+    const answers: string[] = [];
     const deliver = async (message: string): Promise<void> => {
+      answers.push(message);
       await this.notify?.('cli', thread, message).catch(() => {});
       if (source && source.channelId !== thread) {
         await this.notify?.(source.channelType, source.channelId, message).catch(() => {});
       }
     };
     try {
-      return await this.getSlashHook(botId, text, deliver);
+      const answered = await this.getSlashHook(botId, text, deliver);
+      if (answered) this.recordDirectAnswer(botId, text.trim(), answers.join('\n\n'));
+      return answered;
     } catch {
       return false; // a failing hook must never swallow the owner's message
     }
   }
 
+  /**
+   * Post the answer of a daemon-answered command into a bot's own thread —
+   * the same delivery surface as a run result, without running a turn.
+   */
+  async notifyBotThread(botId: string, message: string): Promise<void> {
+    await this.notify?.('cli', `bot:${botId}`, message).catch(() => {});
+  }
+
   async enqueueAsync(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; attachments?: ChannelAttachment[]; mode?: 'work' | 'chat' }): Promise<{ jobId: string; accepted: boolean; reasonCode?: string; duplicated?: boolean }> {
     // Slash commands first, only for the owner's own messages (chat/api
     // triggers): bot-to-bot mail and cron prompts can legitimately start
-    // with "/" and must reach the model.
+    // with "/" and must reach the model. A command answered without a turn
+    // still appears in the journal as a direct answer, so the thread reads
+    // as a conversation (prompt and output come from the run transcript).
     if ((job.trigger === 'chat' || job.trigger === 'api') && !job.fromBot && !job.attachments?.length) {
       if (await this.answerSlash(botId, job.prompt, job.source)) {
         return { jobId: '', accepted: true, duplicated: false };
       }
     }
     return this.enqueue(botId, job);
+  }
+
+  /** The journal line + transcript for a command answered without a turn (the app reads prompt/output from the transcript). */
+  private recordDirectAnswer(botId: string, prompt: string, output: string): void {
+    try {
+      const now = Date.now();
+      const record: BotRunRecord = {
+        runId: `slash-${now.toString(36)}`,
+        botId,
+        trigger: 'chat',
+        state: 'completed',
+        startedAt: now,
+        durationMs: 0,
+        tokensIn: 0,
+        tokensOut: 0,
+        outcome: 'message',
+        report: 'result',
+        complete: true,
+        summary: output.slice(0, 300),
+      };
+      const journal = this.journalFor(botId);
+      journal.append(record);
+      journal.writeTranscript(record, { prompt, output, trace: [] });
+    } catch { /* journaling must never fail an answered command */ }
   }
 
   enqueue(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; attachments?: ChannelAttachment[]; mode?: 'work' | 'chat' }): { jobId: string; accepted: boolean; reasonCode?: string; duplicated?: boolean } {

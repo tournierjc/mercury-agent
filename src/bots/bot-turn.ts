@@ -17,6 +17,7 @@ import { formatToolStep } from '../utils/tool-label.js';
 import { logger } from '../utils/logger.js';
 import { stripLoneSurrogates, truncateText } from '../utils/text-safe.js';
 import type { BotManifest, BotTrigger } from './types.js';
+import { BOT_SLASH_HINTS } from './bot-slash.js';
 import { getDefaultConfig } from '../utils/config.js';
 
 
@@ -1109,6 +1110,11 @@ export function buildBotSystemPrompt(input: BotTurnInput): { stable: string; vol
 - Answer what was asked. Never reply "Nothing to do" and never write a report about the run — no "the user asked X, so I did Y", just the answer.
 - Use your tools when they help (a file to write, a command to check), but a question that needs no tool still deserves a real answer.
 - Be concise and concrete; say plainly when something is outside your specialty.
+- A line starting with "/" is a slash command: the daemon answers a few of them
+  directly, before your turn even runs — ${BOT_SLASH_HINTS.map(([cmd]) => `\`${cmd}\``).join(', ')}.
+  Never answer one from imagination ("I have no compaction tool" is wrong — the
+  gauge is the daemon's, not yours); if a slash reaches you as a real task, say
+  what it would do rather than pretending to have run it.
 - Answer in the conversation. Do not deliver a file unless the owner explicitly asks for one: a
   table, a chart or a rendering belongs in your reply (an \`\`\`openui block, when the OpenUI
   contract is available), not in the deliverables folder.`;
