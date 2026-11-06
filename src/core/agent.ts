@@ -1830,6 +1830,12 @@ export class Agent {
     const pendingBot = (channel as any).consumePendingBotChatTarget?.() ?? null;
     const inBotChat = pendingBot === botId;
     const replyTarget = inBotChat ? `bot:${botId}` : msg.channelId;
+    // A slash command typed in the bot's own conversation is answered there
+    // directly (the hook), never as a turn; /bot <id> /@bot from elsewhere
+    // keeps sending the text to the model as before.
+    if (inBotChat && await bm.answerSlash(botId, message, { channelType: msg.channelType, channelId: replyTarget })) {
+      return;
+    }
     const result = bm.enqueue(botId, {
       trigger: 'chat',
       prompt: message,

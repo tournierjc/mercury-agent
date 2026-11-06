@@ -365,7 +365,7 @@ app.post('/api/bots/:id/chat', async (c: any) => {
     return c.json({ error: 'message is required' }, 400);
   }
 
-  const result = botManager.enqueue(id, {
+  const result = await botManager.enqueueAsync(id, {
     // The trigger says where the turn came from (`chat`: the owner, talking), `mode` says how it
     // is judged (`chat`: an answer, where `work` wants a delivery and counts "Nothing to do" as a
     // run with no outcome).
@@ -407,7 +407,7 @@ app.post('/api/bots/:id/message', async (c: any) => {
   }
   // A photo sent without words still says what it is — models reject an empty text block.
   const prompt = message || `(Attached: ${upload.attachments.map(a => a.name).join(', ')})`;
-  const result = botManager.enqueue(id, {
+  const result = await botManager.enqueueAsync(id, {
     trigger: 'api',
     prompt,
     fromBot: body?.from,
@@ -442,7 +442,7 @@ app.post('/api/bots/:id/chat', async (c: any) => {
   const id = c.req.param('id');
   const body = await c.req.json().catch(() => null) as { message?: string; from?: string } | null;
   if (!body?.message) return c.json({ error: 'message is required' }, 400);
-  const result = botManager.enqueue(id, { trigger: 'chat', prompt: body.message, fromBot: body.from });
+  const result = await botManager.enqueueAsync(id, { trigger: 'chat', prompt: body.message, fromBot: body.from });
   if (!result.accepted) {
     return c.json({ accepted: false, reasonCode: result.reasonCode }, 409);
   }
@@ -890,7 +890,7 @@ app.post('/api/bots/:id/hooks/:hook', async (c: any) => {
   // idempotency key dedupes redeliveries of the same event.
   const eventId = c.req.header('x-event-id');
   const prompt = eventId ? `[hook:${c.req.param('hook')}:${eventId}] ${text}` : `[hook:${c.req.param('hook')}] ${text}`;
-  const result = botManager.enqueue(id, { trigger: 'api', prompt });
+  const result = await botManager.enqueueAsync(id, { trigger: 'api', prompt });
   if (!result.accepted) {
     return c.json({ accepted: false, reasonCode: result.reasonCode }, 409);
   }

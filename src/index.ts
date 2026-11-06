@@ -55,6 +55,7 @@ import { ShortTermMemory, LongTermMemory, EpisodicMemory, migrateLegacyMemory } 
 import { buildConversationHistoryPayload, CloudSessionSynchronizer, SessionRepository } from './sessions/index.js';
 import { UserMemoryStore } from './memory/user-memory.js';
 import { BotManager } from './bots/bot-manager.js';
+import { answerBotSlashCommand } from './bots/bot-slash.js';
 import { getPluginManager, peekPluginManager, setProviderLookup } from './plugins/manager.js';
 import { setCallLearning, setChannelHost, setDesktopActivityHook, setVoiceBriefing, setWorkProbe, setWorkStopper } from './plugins/channel-bridge.js';
 import { registerPluginsCli } from './cli/plugins-cli.js';
@@ -2812,6 +2813,10 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
       .then(() => bot.migrateDeliverables())
       .then(() => bot.registerRoutines(scheduler));
     agent.setBotManager(bot);
+    // Slash commands in bot threads: /compact (and /help) answer from the
+    // agent's own keeper state, not from a bot turn — the bot's context is
+    // fresh every run, so only the daemon can read a real gauge.
+    bot.setSlashHook((botId, text, deliver) => answerBotSlashCommand(agent, bot, botId, text, deliver));
     setWebBotManager(bot);
     // Real-time bot activity bus → surfaces: the CLI bot-thread live region
     // (what the bot is doing RIGHT NOW while you watch its thread) and the
