@@ -444,6 +444,56 @@ export class BotManager {
     return this.journalFor(botId);
   }
 
+  private getSlashHook?: (
+    botId: string,
+    text: string,
+    deliver: (message: string) => Promise<void>,
+  ) => Promise<boolean>;
+
+  /**
+   * Slash commands for bot threads, wired by the host (index.ts): a
+   * recognized command is answered before the job is queued, so the owner
+   * typing `/compact` in a bot conversation gets the same deterministic
+   * answer as in the main chat. The hook returns true when it answered.
+   */
+  setSlashHook(hook: (botId: string, text: string, deliver: (message: string) => Promise<void>) => Promise<boolean>): void {
+    this.getSlashHook = hook;
+  }
+
+  /**
+   * A slash command typed into a bot thread: ask the host, and if it owns the
+   * command deliver its answer into the thread instead of queueing a turn.
+   * Returns true when the message was answered and must not run as a job.
+   * `source` is the remote surface the message came from, when any.
+   */
+  async answerSlash(botId: string, text: string, source?: { channelType: string; channelId: string }): Promise<boolean> {
+    if (!this.getSlashHook || !text.trim().startsWith('/')) return false;
+    const thread = `bot:${botId}`;
+    const deliver = async (message: string): Promise<void> => {
+      await this.notify?.('cli', thread, message).catch(() => {});
+      if (source && source.channelId !== thread) {
+        await this.notify?.(source.channelType, source.channelId, message).catch(() => {});
+      }
+    };
+    try {
+      return await this.getSlashHook(botId, text, deliver);
+    } catch {
+      return false; // a failing hook must never swallow the owner's message
+    }
+  }
+
+  async enqueueAsync(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; attachments?: ChannelAttachment[]; mode?: 'work' | 'chat' }): Promise<{ jobId: string; accepted: boolean; reasonCode?: string; duplicated?: boolean }> {
+    // Slash commands first, only for the owner's own messages (chat/api
+    // triggers): bot-to-bot mail and cron prompts can legitimately start
+    // with "/" and must reach the model.
+    if ((job.trigger === 'chat' || job.trigger === 'api') && !job.fromBot && !job.attachments?.length) {
+      if (await this.answerSlash(botId, job.prompt, job.source)) {
+        return { jobId: '', accepted: true, duplicated: false };
+      }
+    }
+    return this.enqueue(botId, job);
+  }
+
   enqueue(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; attachments?: ChannelAttachment[]; mode?: 'work' | 'chat' }): { jobId: string; accepted: boolean; reasonCode?: string; duplicated?: boolean } {
     const manifest = this.store.get(botId);
     if (!manifest) return { jobId: '', accepted: false, reasonCode: 'target_unknown' };

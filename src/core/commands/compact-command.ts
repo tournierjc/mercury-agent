@@ -40,6 +40,16 @@ function sessionForMessage(agent: Agent, msg: ChannelMessage): string {
   return agent.sessions.getOrCreateBound(msg.channelType as never, external, undefined).id;
 }
 
+/**
+ * The gauge text for one conversation, shared by every surface that answers
+ * `/compact`: the chat fast-path (handleCompactCommand) and the bot threads
+ * (BotManager.answerSlashCommand), which have a thread to answer into instead
+ * of a Channel.
+ */
+export async function compactGaugeText(agent: Agent, sessionId: string): Promise<string> {
+  return formatGauge(agent.contextSnapshot(sessionId));
+}
+
 export async function handleCompactCommand(agent: Agent, msg: ChannelMessage): Promise<void> {
   const channel = agent.channels.getChannelForMessage(msg);
   if (!channel) return;
