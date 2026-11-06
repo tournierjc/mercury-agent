@@ -131,6 +131,9 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /** A cookie-authenticated change must come from a page this server (or an allowed app) served. */
 function crossSite(c: Context): boolean {
+  // No Origin/Referer at all = not a browser (native clients, curl): nothing
+  // to compare, and a real cross-site browser request always carries Origin.
+  if (!c.req.header('origin') && !c.req.header('referer')) return false;
   const origin = c.req.header('origin') ?? (() => { try { return new URL(c.req.header('referer') ?? '').origin; } catch { return ''; } })();
   if (!origin || origin === 'null') return true;
   try {
@@ -187,7 +190,9 @@ export async function authGuard(c: Context, next: Next) {
     return next();
   }
   if (PUBLIC_PATHS.has(path)) {
-    // The sign-in form posts from its own page; anything else posting a password is forged.
+    // The sign-in form posts from its own page; anything else posting a
+    // password is forged. Native clients (the Android app) send no Origin
+    // header at all — only a *mismatched* one forges a browser request.
     if (!SAFE_METHODS.has(c.req.method) && path === '/api/auth/login' && crossSite(c)) return c.text('Forbidden', 403);
     return next();
   }
