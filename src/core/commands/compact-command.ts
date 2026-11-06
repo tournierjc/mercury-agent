@@ -45,9 +45,30 @@ function sessionForMessage(agent: Agent, msg: ChannelMessage): string {
  * `/compact`: the chat fast-path (handleCompactCommand) and the bot threads
  * (BotManager.answerSlashCommand), which have a thread to answer into instead
  * of a Channel.
+ *
+ * A bot conversation lives outside the session store (its turns run fresh in
+ * runBotTurn), so the session's own history is empty by design. `botHistory`
+ * supplies what the owner's thread actually costs, read from the bot's durable
+ * transcripts — without it a bot gauge would read 0 and say "nothing to
+ * compact" while a week of exchanges sits on disk.
  */
-export async function compactGaugeText(agent: Agent, sessionId: string): Promise<string> {
-  return formatGauge(agent.contextSnapshot(sessionId));
+export async function compactGaugeText(
+  agent: Agent,
+  sessionId: string,
+  botHistory?: () => { tokens: number; turns: number },
+): Promise<string> {
+  const snapshot = agent.contextSnapshot(sessionId);
+  if (snapshot.historyTokens === 0 && botHistory) {
+    const { tokens, turns } = botHistory();
+    if (tokens > 0) {
+      return [
+        `Context: ${tokens.toLocaleString()} tokens across ${turns} turn${turns === 1 ? '' : 's'}`,
+        `Keeper: ${snapshot.enabled ? 'on' : 'off'}${snapshot.saverActive ? ' (saver active)' : ''} · cuts: ${snapshot.cuts} · archived turns: ${snapshot.archivedTurns}`,
+        'A bot answers each message from a fresh context plus its own notes and journal — this thread carries no window to compact.',
+      ].join('\n');
+    }
+  }
+  return formatGauge(snapshot);
 }
 
 export async function handleCompactCommand(agent: Agent, msg: ChannelMessage): Promise<void> {

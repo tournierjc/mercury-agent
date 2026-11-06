@@ -24,9 +24,10 @@ const agentStub = (overrides: Partial<Record<string, any>> = {}) => ({
   ...overrides,
 }) as any;
 
-const managerStub = (names: string[] = ['smith']) => ({
+const managerStub = (names: string[] = ['smith'], historyTokens = 0) => ({
   resolveBotId: (id: string) => (names.includes(id) ? id : null),
   notifyBotThread: vi.fn(async (_botId: string, _message: string) => {}),
+  threadHistoryTokens: vi.fn(() => ({ tokens: historyTokens, turns: historyTokens ? 3 : 0 })),
 }) as any;
 
 describe('answerBotSlashCommand', () => {
@@ -81,11 +82,37 @@ describe('answerBotSlashCommand', () => {
     expect(deliver).not.toHaveBeenCalled();
   });
 
-  it('an empty thread answers instead of crashing', async () => {
-    const agent = agentStub({ sessions: { getByBinding: vi.fn(() => null), getOrCreateBound: vi.fn(() => ({ id: 'x' })) } });
+  it('a sessionless thread (a bot: turns run fresh) reads the durable history', async () => {
+    // An empty session — historyTokens 0 — is what a bot thread really is.
+    const emptySession = {
+      enabled: true, saverActive: false, budget: 200_000,
+      historyTokens: 0, viewTokens: 0, needsCompression: false,
+      cuts: 0, archivedTurns: 0,
+    };
+    const agent = agentStub({
+      contextSnapshot: vi.fn(() => emptySession),
+      sessions: { getByBinding: vi.fn(() => null), getOrCreateBound: vi.fn(() => ({ id: 'x' })) },
+    });
+    const deliver = vi.fn(async (_m: string) => {});
+    expect(await answerBotSlashCommand(agent, managerStub(['smith'], 12_500), 'smith', '/compact', deliver)).toBe(true);
+    expect(deliver.mock.calls[0][0]).toContain('12,500 tokens across 3 turns');
+    expect(deliver.mock.calls[0][0]).toContain('fresh context');
+  });
+
+  it('a sessionless thread with no history says so plainly', async () => {
+    const agent = agentStub({
+      contextSnapshot: vi.fn(() => ({
+        enabled: true, saverActive: false, budget: 200_000,
+        historyTokens: 0, viewTokens: 0, needsCompression: false,
+        cuts: 0, archivedTurns: 0,
+      })),
+      sessions: { getByBinding: vi.fn(() => null), getOrCreateBound: vi.fn(() => ({ id: 'x' })) },
+    });
     const deliver = vi.fn(async (_m: string) => {});
     expect(await answerBotSlashCommand(agent, managerStub(), 'smith', '/compact', deliver)).toBe(true);
-    expect(deliver.mock.calls[0][0]).toContain('No context recorded');
+    // No durable history either: the plain gauge, no per-turn claim.
+    expect(deliver.mock.calls[0][0]).toContain('Context: 0');
+    expect(deliver.mock.calls[0][0]).not.toMatch(/across \d+ turns/);
   });
 });
 

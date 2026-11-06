@@ -72,12 +72,12 @@ export async function answerBotSlashCommand(
       return true;
     }
 
-    // The bot's own thread session: the binding the transcript is written to.
-    const session = agent.sessions.getByBinding('cli', `bot:${botId}`);
-    if (!session) {
-      await deliver('No context recorded for this thread yet — nothing to compact.');
-      return true;
-    }
+    // The bot's own thread session — the binding the transcript uses. A bot
+    // that has never been through the main loop has no session there (its
+    // turns run in runBotTurn, outside the session store): the gauge then
+    // reads the bot's real conversation history, kept on disk per bot.
+    const session = agent.sessions.getByBinding('cli', `bot:${botId}`)
+      ?? agent.sessions.getOrCreateBound('cli' as never, `bot:${botId}`, undefined);
 
     if (sub === 'now' || sub === 'force') {
       if (agent.isBusyWith(session.id)) {
@@ -95,7 +95,7 @@ export async function answerBotSlashCommand(
       return true;
     }
 
-    await deliver(await compactGaugeText(agent, session.id));
+    await deliver(await compactGaugeText(agent, session.id, () => manager.threadHistoryTokens(botId)));
     return true;
   }
 
@@ -141,11 +141,8 @@ export async function answerCompactForBot(
   }
 
   if (sub === 'now' || sub === 'force') {
-    const session = agent.sessions.getByBinding('cli', `bot:${botId}`);
-    if (!session) {
-      await deliver('No context recorded for this bot yet — nothing to compress.');
-      return true;
-    }
+    const session = agent.sessions.getByBinding('cli', `bot:${botId}`)
+      ?? agent.sessions.getOrCreateBound('cli' as never, `bot:${botId}`, undefined);
     if (agent.isBusyWith(session.id)) {
       await deliver(`${botId} is still working — stop it first, then try again.`);
       return true;
@@ -162,6 +159,6 @@ export async function answerCompactForBot(
   }
 
   const session = agent.sessions.getOrCreateBound('cli' as never, `bot:${botId}`, undefined);
-  await deliver(await compactGaugeText(agent, session.id));
+  await deliver(await compactGaugeText(agent, session.id, () => manager.threadHistoryTokens(botId)));
   return true;
 }

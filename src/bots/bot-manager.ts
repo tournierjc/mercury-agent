@@ -37,6 +37,7 @@ import { mergePathScopes } from './registry-factory.js';
 import { synthesizeSkill, MIN_TOOLS_FOR_SYNTHESIS } from './skill-synthesis.js';
 import { SkillLoader } from '../skills/loader.js';
 import { logger } from '../utils/logger.js';
+import { estimateTokens } from '../core/context-window.js';
 import type {
   BotLiveState,
   BotManifest,
@@ -492,6 +493,30 @@ export class BotManager {
    */
   async notifyBotThread(botId: string, message: string): Promise<void> {
     await this.notify?.('cli', `bot:${botId}`, message).catch(() => {});
+  }
+
+  /**
+   * What the owner's conversation with this bot costs the model, in tokens,
+   * from the bot's durable history (the transcripts the app rebuilds the
+   * thread from). A bot's turns run outside the session store — runBotTurn
+   * starts fresh every run — so the thread's session is empty by design, and
+   * the gauge for a bot conversation is read here instead.
+   */
+  threadHistoryTokens(botId: string): { tokens: number; turns: number } {
+    try {
+      const journal = this.journalFor(botId);
+      let tokens = 0;
+      let turns = 0;
+      for (const entry of journal.listTranscripts(botId)) {
+        const t = journal.readTranscript(botId, entry.runId);
+        if (!t) continue;
+        turns += 1;
+        tokens += estimateTokens(t.prompt) + estimateTokens(t.output);
+      }
+      return { tokens, turns };
+    } catch {
+      return { tokens: 0, turns: 0 };
+    }
   }
 
   async enqueueAsync(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; attachments?: ChannelAttachment[]; mode?: 'work' | 'chat' }): Promise<{ jobId: string; accepted: boolean; reasonCode?: string; duplicated?: boolean }> {
