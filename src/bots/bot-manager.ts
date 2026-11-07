@@ -245,6 +245,13 @@ export class BotManager {
   /** Fleet-wide daily usage and pause (ADR-020). */
   private fleetDailyTokens: { day: string; tokens: number } = { day: '', tokens: 0 };
   private fleetPausedDay: string | null = null;
+  /**
+   * Why the budget pause is day-stamped and not a bare flag: the pause is a decision
+   * about ONE day's spend. A restart in the middle of that day re-reads today's counters
+   * and must re-pause if the cap is still reached — but a pause raised yesterday must die
+   * with the day it belonged to. A bare flag survived restarts forever and read to the
+   * owner as 'budget 0 = 0 left, nothing runs' with no way to tell it from a live cap.
+   */
   /** routine key → when its last run ended (min-interval gate). */
   private routineLastEnd: Map<string, number> = new Map();
   /** botId → UTC day a turn-limit notice was sent (once a day, not per run). */
@@ -964,6 +971,14 @@ export class BotManager {
       this.activity.set(botId, 'Paused — daily token budget reached');
       return;
     }
+    // A fleet pause belongs to the day that raised it: if the fleet counter is no
+    // longer today's (a restart after midnight, the day the sweep missed), the pause
+    // is stale — clear it instead of holding every bot forever on a spent day.
+    if (this.fleetPausedDay && this.fleetPausedDay !== today) this.fleetPausedDay = null;
+    if (this.fleetDailyTokens.day && this.fleetDailyTokens.day !== today) {
+      this.fleetDailyTokens = { day: '', tokens: 0 };
+      this.fleetPausedDay = null;
+    }
     if (this.fleetPausedDay === today) {
       this.activity.set(botId, 'Paused — fleet daily token budget reached');
       return;
@@ -1011,6 +1026,33 @@ export class BotManager {
     const own = manifest.autonomy?.dailyTokenBudget;
     if (own !== undefined) return own;
     return this.config.bots?.suggestedDailyTokenBudget ?? 5_000_000;
+  }
+
+  /**
+   * Release a budget pause the current cap no longer justifies. Every route that
+   * raises a ceiling ('/bots budget', PUT autonomy, the budget console) must call
+   * this: a bot stopped at 5M that is given 50M today has reached nothing, and
+   * leaving it in pausedForBudget until midnight was the 'cap 0/0 but still
+   * paused, nothing runs' bug. 0 = unlimited, so it releases too.
+   */
+  releaseBudgetPauseIfUnderCap(botId: string): void {
+    const manifest = this.store.get(botId);
+    if (!manifest) return;
+    const cap = this.dailyCapFor(manifest);
+    if (cap <= 0 || this.dailyUsage(botId).tokens < cap) this.pausedForBudget.delete(botId);
+  }
+
+  /**
+   * Raise a bot's daily cap (the PUT /api/bots/:id autonomy path; the chat route
+   * updates the manifest then calls the release above).
+   */
+  setDailyTokenBudget(botId: string, budget: number): void {
+    const manifest = this.store.get(botId);
+    if (!manifest) return;
+    manifest.autonomy = { ...(manifest.autonomy ?? {}), dailyTokenBudget: budget };
+    this.store.save(manifest);
+    this.releaseBudgetPauseIfUnderCap(botId);
+    logger.info({ botId, budget }, 'Bot daily token budget updated');
   }
 
   /** Today's spend for /bots and the API. */

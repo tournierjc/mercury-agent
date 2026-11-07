@@ -309,6 +309,8 @@ export async function handleBotsCommand(agent: Agent, trimmed: string, msg: Chan
           m.autonomy = { ...m.autonomy, dailyTokenBudget: n };
         }
       });
+      // A raised ceiling releases the pause it makes obsolete — today, not at midnight.
+      bm.releaseBudgetPauseIfUnderCap(target);
       bm.invalidateRuntime(target);
       const m = bm.store.get(target);
       const cap = m ? bm.dailyCapFor(m) : 0;

@@ -204,6 +204,40 @@ describe('BotManager queue + turn lifecycle', () => {
     expect(manager.getQueuedCount('thrifty')).toBe(0);
   });
 
+  it('raising the cap releases a budget pause today (the budget-0-means-unlimited bug)', async () => {
+    mockedGenerateText.mockImplementation(async (opts: any) => {
+      opts.onStepFinish?.({ usage: { inputTokens: 100, outputTokens: 100 } });
+      return { text: 'ok', finishReason: 'stop', usage: { inputTokens: 100, outputTokens: 100 } } as any;
+    });
+    seedBot(store, 'thriftier', { autonomy: { dailyTokenBudget: 1 } });
+    manager.enqueue('thriftier', { trigger: 'chat', prompt: 'go' });
+    await vi.waitFor(() => {
+      expect(manager.getStatusSummaries().find(s => s.id === 'thriftier')?.state).toBe('paused');
+    });
+
+    // Same spend, raised ceiling: the pause was a decision about the OLD cap — void now.
+    manager.setDailyTokenBudget('thriftier', 5_000_000);
+    expect(manager['pausedForBudget'].has('thriftier')).toBe(false);
+
+    // And 0 = unlimited releases just the same.
+    manager['pausedForBudget'].add('thriftier'); // simulate the pause the old cap raised
+    manager.setDailyTokenBudget('thriftier', 0);
+    expect(manager['pausedForBudget'].has('thriftier')).toBe(false);
+  });
+
+  it('a fleet pause from a previous day does not hold the fleet after a restart', async () => {
+    // The day's spend is re-derived at boot; a bare pause flag survived restarts.
+    manager['fleetPausedDay'] = '2000-01-01';
+    manager['fleetDailyTokens'] = { day: '2000-01-01', tokens: 99_000_000 };
+    seedBot(store, 'woken');
+    mockedGenerateText.mockResolvedValue({ text: 'up again', finishReason: 'stop', usage: { inputTokens: 1, outputTokens: 1 } } as any);
+    manager.enqueue('woken', { trigger: 'chat', prompt: 'go' });
+    await vi.waitFor(() => {
+      expect(manager.getJournal('woken').length).toBe(1);
+    });
+    expect(manager['fleetPausedDay']).toBeNull();
+  });
+
   it('retries transient provider failures with backoff, bounded', async () => {
     mockedGenerateText.mockRejectedValue(new Error('HTTP 429: too many requests'));
     seedBot(store, 'flaky', { autonomy: { dailyTokenBudget: 100000 } });

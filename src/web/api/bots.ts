@@ -327,6 +327,8 @@ app.patch('/api/bots/:id', async (c: any) => {
       if (patch.autonomy !== undefined) m.autonomy = patch.autonomy;
       if (patch.retention !== undefined) m.retention = patch.retention;
     });
+    // An autonomy edit can raise the daily cap: a pause that cap caused is void now.
+    if (patch.autonomy !== undefined) botManager.releaseBudgetPauseIfUnderCap(id);
     botManager.invalidateRuntime(id);
     // Edited routines take effect now, not at the next restart.
     if (patch.schedules !== undefined || patch.enabled !== undefined) botManager.syncRoutines(id, previousRoutines);
