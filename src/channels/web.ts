@@ -50,8 +50,7 @@ interface PendingInteraction {
 }
 
 export interface ChatEvent {
-  type: 'activity' | 'thinking' | 'reasoning' | 'plan' | 'artifacts' | 'provider' | 'heartbeat' | 'step_start' | 'step_done' | 'text_delta' | 'text_done' | 'progress' | 'phase' | 'media_ready' | 'media_pending' | 'permission_request' | 'permission_continue' | 'permission_mode' | 'permission_resolved' | 'choice_prompt' | 'choice_resolved' | 'loop_warning' | 'error' | 'bot_activity' | 'status' | 'session_switched' | 'queued' | 'queue_dropped' | 'research' | 'research_plan' | 'research_plan_resolved' | 'notice' | 'owner_approval';
-  data?: Record<string, unknown>;
+  type: 'activity' | 'thinking' | 'reasoning' | 'plan' | 'artifacts' | 'provider' | 'heartbeat' | 'step_start' | 'step_done' | 'text_delta' | 'text_done' | 'progress' | 'phase' | 'media_ready' | 'media_pending' | 'permission_request' | 'permission_continue' | 'permission_mode' | 'permission_resolved' | 'choice_prompt' | 'choice_resolved' | 'loop_warning' | 'error' | 'bot_activity' | 'status' | 'session_switched' | 'queued' | 'queue_dropped' | 'research' | 'research_plan' | 'research_plan_resolved' | 'notice' | 'bot_roster' | 'owner_approval';  data?: Record<string, unknown>;
 }
 
 class SSEClient {
@@ -325,6 +324,15 @@ export class WebChannel extends BaseChannel {
 
   broadcastBotActivity(ev: { botId: string; jobId: string; kind: string; label: string; detail?: string; stepIndex: number; elapsedMs: number; status?: string }): void {
     this.broadcast({ type: 'bot_activity', data: { ...ev } });
+  }
+
+  /**
+   * A fresh fleet snapshot on every roster change: `bot_roster` carries the full
+   * summaries, so a phone re-diffs its notifications and retires the cards a
+   * state transition has made stale ("needs you" answered, mail read).
+   */
+  broadcastBotRoster(bm: { getStatusSummaries: () => unknown; queue: { counts: () => unknown } }): void {
+    this.broadcast({ type: 'bot_roster', data: { bots: bm.getStatusSummaries(), queue: bm.queue.counts() } });
   }
 
   private broadcast(event: ChatEvent): boolean {

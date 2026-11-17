@@ -54,6 +54,7 @@ export function isPermissionTier(value: string): value is PermissionTier {
  */
 export function tierPermissionsFile(tier: PermissionTier): BotPermissionsFile {
   const file: BotPermissionsFile = {
+    tier,
     paths: [{ scope: 'self', read: true, write: true, execute: tier === 'operator' || tier === 'full' }],
     tools: { deny: [...PERMISSION_TIERS[tier].deny] },
   };

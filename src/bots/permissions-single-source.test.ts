@@ -70,6 +70,13 @@ describe('permissions.yaml — single source of truth', () => {
     expect(readonly.paths).toEqual([{ scope: 'self', read: true, write: true, execute: false }]);
   });
 
+  it('the written file names the tier, so the app can show which one is applied', () => {
+    // Sans ce champ, permissions.yaml n'est qu'un jeu de refus : l'app ne peut pas dire quel
+    // palier est actif, et choisir un palier semble ne rien faire.
+    expect(tierPermissionsFile('operator').tier).toBe('operator');
+    expect(tierPermissionsFile('readonly').tier).toBe('readonly');
+  });
+
   it('the tool gate comes from permissions.yaml, overriding any legacy manifest block', () => {
     const all = { read_file: {}, run_command: {}, write_file: {} } as any;
     const manifest = { tools: { deny: ['run_command'] } } as any;

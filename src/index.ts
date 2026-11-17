@@ -62,6 +62,7 @@ import { ShortTermMemory, LongTermMemory, EpisodicMemory, migrateLegacyMemory } 
 import { buildConversationHistoryPayload, CloudSessionSynchronizer, SessionRepository } from './sessions/index.js';
 import { UserMemoryStore } from './memory/user-memory.js';
 import { BotManager } from './bots/bot-manager.js';
+import { answerBotSlashCommand } from './bots/bot-slash.js';
 import { getPluginManager, peekPluginManager, setProviderLookup } from './plugins/manager.js';
 import { setCallLearning, setChannelHost, setDesktopActivityHook, setVoiceBriefing, setWorkProbe, setWorkStopper } from './plugins/channel-bridge.js';
 import { registerPluginsCli } from './cli/plugins-cli.js';
@@ -107,8 +108,7 @@ import { ProviderModelFetchError, fetchProviderModelCatalog } from './utils/prov
 import { withBaseUrl } from './providers/basic-auth.js';
 import { initCloudTokenStore } from './cloud/token-store.js';
 import { clearCloudRuntimeOnline, markCloudRuntimeOnline } from './cloud/runtime-status.js';
-import { startWebServer, stopWebServer, updateStatus as updateWebStatus, setUserMemory as setWebUserMemory, setWebChannel as setWebWebChannel, setScheduler as setWebScheduler, setAgentSupervisor as setWebSupervisor, setBackgroundTaskManager as setWebBgTasks, setSpotifyClient as setWebSpotify, setProgrammingMode as setWebProgrammingMode, setModelSwitchCallback as setWebModelSwitch, setCurrentProviderCallback as setWebCurrentProvider, setStatusSnapshotCallback as setWebStatusSnapshot, setKanbanSupervisor as setWebKanban, setKanbanBoardManager as setWebBoardManager, setKanbanProviders as setWebKanbanProviders, setIDEProviders as setWebIDEProviders, setSessionRepository as setWebSessions, setSessionSyncEnabledCallback as setWebSessionSyncEnabled, setBotManager as setWebBotManager, setBotsWebhookSecret, setShutdownHandler, setMcpManager as setWebMcpManager, setStopCallback as setWebStop, setSessionBusyLookup as setWebSessionBusy, setQueueControls as setWebQueueControls, setTurnControls as setWebTurnControls, setResearchControls as setWebResearchControls, setBudgetControls as setWebBudgetControls } from './web/server.js';
-import { validateApiKey, validateBaseUrl, validateModelName } from './providers/provider-meta.js';
+import { startWebServer, stopWebServer, updateStatus as updateWebStatus, setUserMemory as setWebUserMemory, setWebChannel as setWebWebChannel, setScheduler as setWebScheduler, setAgentSupervisor as setWebSupervisor, setBackgroundTaskManager as setWebBgTasks, setSpotifyClient as setWebSpotify, setProgrammingMode as setWebProgrammingMode, setModelSwitchCallback as setWebModelSwitch, setCurrentProviderCallback as setWebCurrentProvider, setStatusSnapshotCallback as setWebStatusSnapshot, setKanbanSupervisor as setWebKanban, setKanbanBoardManager as setWebBoardManager, setKanbanProviders as setWebKanbanProviders, setIDEProviders as setWebIDEProviders, setSessionRepository as setWebSessions, setSessionSyncEnabledCallback as setWebSessionSyncEnabled, setBotManager as setWebBotManager, setSandboxTools, setBotsWebhookSecret, setShutdownHandler, setMcpManager as setWebMcpManager, setStopCallback as setWebStop, setSessionBusyLookup as setWebSessionBusy, setQueueControls as setWebQueueControls, setTurnControls as setWebTurnControls, setResearchControls as setWebResearchControls, setBudgetControls as setWebBudgetControls, setContextControls } from './web/server.js';import { validateApiKey, validateBaseUrl, validateModelName } from './providers/provider-meta.js';
 import { setFirstProviderHandler, setProvidersReload } from './web/api/providers.js';
 import { setCloudReload } from './web/api/cloud.js';
 import { spawnDetachedRestart } from './cli/daemon.js';
@@ -119,6 +119,7 @@ import { setArtifactOutputDir, setArtifactSessions } from './web/api/artifacts.j
 import { setSuggestionEngine } from './web/api/suggestions.js';
 import { artifactStore } from './artifacts/store.js';
 import { isWebAuthInitialized, setWebPassword, writeAttachToken, initWebAuth } from './web/auth.js';
+import { SandboxTools, toolsPath } from './sandbox/tools.js';
 import { startLoopLagMonitor } from './utils/loop-lag.js';
 import { McpManager, probeMcpServer, validateMcpConfig, type McpServerStatus } from './capabilities/mcp/index.js';
 import {
@@ -211,6 +212,7 @@ const PROVIDER_OPTIONS: Array<{ key: ProviderName; label: string }> = [
   { key: 'aimlapi', label: 'AI/ML API (350+ models on one key)' },
   { key: 'deepseek', label: 'DeepSeek' },
   { key: 'openai', label: 'OpenAI' },
+  { key: 'openrouter', label: 'OpenRouter (one key, every vendor)' },
   { key: 'anthropic', label: 'Anthropic' },
   { key: 'githubCopilot', label: 'GitHub Copilot' },
   { key: 'grok', label: 'Grok (xAI)' },
@@ -221,6 +223,7 @@ const PROVIDER_OPTIONS: Array<{ key: ProviderName; label: string }> = [
   { key: 'ollamaLocal', label: 'Ollama Local' },
   { key: 'atomicChat', label: 'Atomic Chat' },
   { key: 'openaiCompat', label: 'OpenAI Compilations' },
+  { key: 'openrouter', label: 'OpenRouter' },
   { key: 'mimo', label: 'MiMo (Xiaomi)' },
   { key: 'mimoTokenPlan', label: 'MiMo Token Plan (Xiaomi)' },
   { key: 'lmStudio', label: 'LM Studio' },
@@ -2866,6 +2869,18 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
     void pluginManager.boot().catch((err) => logger.error({ err }, 'Plugin boot failed'));
   }
 
+  // Tools installed from the phone land in ~/.mercury/tools/bin (the mounted volume, so they
+  // survive a container upgrade). Putting that directory on the daemon's PATH is what makes a bot's
+  // `run_command` find them: there is no per-bot process to configure. Registered before the fleet,
+  // so the screen answers even when bots are disabled.
+  {
+    const dir = toolsPath();
+    if (!process.env.PATH?.split(':').includes(dir)) {
+      process.env.PATH = `${dir}:${process.env.PATH ?? ''}`;
+    }
+    setSandboxTools(new SandboxTools());
+  }
+
   // Mercury Bots: fleet manager runs outside the main message queue.
   let botManager: BotManager | undefined;
   if (config.bots?.enabled && !daemonOwnsRuntime) {
@@ -2891,6 +2906,10 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
       .then(() => bot.migrateDeliverables())
       .then(() => bot.registerRoutines(scheduler));
     agent.setBotManager(bot);
+    // Slash commands in bot threads: /compact (and /help) answer from the
+    // agent's own keeper state, not from a bot turn — the bot's context is
+    // fresh every run, so only the daemon can read a real gauge.
+    bot.setSlashHook((botId, text, deliver) => answerBotSlashCommand(agent, bot, botId, text, deliver));
     setWebBotManager(bot);
     // Real-time bot activity bus → surfaces: the CLI bot-thread live region
     // (what the bot is doing RIGHT NOW while you watch its thread) and the
@@ -2901,6 +2920,10 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
       if (botCliChannel instanceof CLIChannel && ev.kind !== 'queued') botCliChannel.setBotLiveActivity(ev.botId, { ...ev, kind: ev.kind });
       webChannel.broadcastBotActivity(ev);
     });
+    // A roster change a client's badge reads must be pushed, not polled: needsYou
+    // flipping off, mail being marked read, a bot deleted. Without this the phone
+    // kept its notification cards until the process died — nothing ever told it.
+    bot.onRosterChange(() => webChannel.broadcastBotRoster(bot));
     if (config.bots?.webhookSecret) {
       setBotsWebhookSecret(config.bots.webhookSecret);
     }
@@ -3668,6 +3691,24 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
     off: (id) => { if (agent.researchMode.armedForSession(id)) agent.researchMode.setOff(); webChannel.sendResearchArmed(false, id); },
   });
   setWebBudgetControls({ config: () => config, tokens: () => tokenBudget, saver: () => agent.saverMode });
+  setContextControls({
+    snapshot: (sessionId) => agent.contextSnapshot(sessionId),
+    compress: (sessionId) => agent.compressSessionContext(sessionId),
+    recall: (sessionId, query, limit) => {
+      const session = sessions.get(sessionId);
+      const keeper = agent.keeperForInspection(session.id);
+      return { turns: keeper.archivedCount, hits: keeper.recall(query, limit) };
+    },
+    busy: (sessionId) => agent.isBusyWith(sessionId),
+    keeperEnabled: () => !!config.tokens?.keeper?.enabled,
+    setKeeperEnabled: (enabled) => {
+      const fresh = loadConfig();
+      fresh.tokens = fresh.tokens ?? {};
+      fresh.tokens.keeper = { ...fresh.tokens.keeper, enabled };
+      saveConfig(fresh);
+      agent.setKeeperEnabled(enabled);
+    },
+  });
   // Updates wait for running work: a reply, queued messages, bot turns.
   {
     const { setUpdateBusyProbe, reconcileUpdateJob } = await import('./updates/server-updater.js');

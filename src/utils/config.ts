@@ -45,10 +45,40 @@ export interface ProviderConfig {
   vision?: boolean;
   /**
    * HTTP Basic credentials for a server behind a reverse proxy. When `username`
-   * is set, Mercury sends `Authorization: Basic ...` instead of the Bearer key.
+   * is set, Mercury sends `Authorization: Basic *** instead of the Bearer key.
    */
   username?: string;
   password?: string;
+  /**
+   * Which client speaks to this endpoint.
+   *
+   * `openai` (the default) uses OpenAI's own client, which reads the `reasoning`
+   * field of OpenAI's API and drops the `reasoning_content` a compatible server
+   * sends. `compatible` uses the OpenAI-compatible client, the only one that turns
+   * it into stream parts. Both the agent and the bot turn record thinking from
+   * those parts, so with `openai` a self-hosted model's thinking is counted,
+   * billed, and thrown away.
+   *
+   * Opt-in per endpoint on purpose: the two clients also differ in how they place
+   * tool calls and multi-part messages, so a provider is moved only after being
+   * tried.
+   */
+  transport?: ProviderTransport;
+  /** OpenRouter only: pin one endpoint of the model (see ProviderRouting). */
+  routing?: ProviderRouting;
+}
+
+/** The two clients an OpenAI-shaped endpoint can be reached through. */
+export type ProviderTransport = 'openai' | 'compatible';
+
+/** OpenRouter's endpoint pin: which hosts serve the model, in which quantization. */
+export interface ProviderRouting {
+  /** Provider slugs to try, in order (OpenRouter's `provider.order`). */
+  order?: string[];
+  /** Quantizations to accept, e.g. ['fp8']. */
+  quantizations?: string[];
+  /** When a pin is set, fall back to other hosts if it is down. Default: false. */
+  allowFallbacks?: boolean;
 }
 
 export interface TelegramAccessUser {
@@ -73,6 +103,7 @@ export type ProviderName =
   | 'mercuryCloud'
   | 'aimlapi'
   | 'openai'
+  | 'openrouter'
   | 'anthropic'
   | 'deepseek'
   | 'grok'
@@ -83,12 +114,24 @@ export type ProviderName =
   | 'ollamaLocal'
   | 'atomicChat'
   | 'openaiCompat'
+  | 'openrouter'
   | 'mimo'
   | 'mimoTokenPlan'
   | 'lmStudio'
   | 'chatgptWeb'
   | 'githubCopilot'
   | 'litellm';
+
+/**
+ * OpenRouter-only: which endpoint of the model to use. The gateway fronts many
+ * hosts for the same weights, and `order` + `quantizations` is how a caller
+ * pins one — e.g. `inference-net` in `fp8` rather than whatever answers first.
+ */
+export interface ProviderRouting {
+  order?: string[];
+  quantizations?: string[];
+  allowFallbacks?: boolean;
+}
 
 export interface CloudConfig {
   enabled: boolean;
@@ -119,6 +162,7 @@ export interface MercuryConfig {
     aimlapi: ProviderConfig;
     mercuryCloud: ProviderConfig;
     openai: ProviderConfig;
+    openrouter: ProviderConfig;
     anthropic: ProviderConfig;
     deepseek: ProviderConfig;
     grok: ProviderConfig;
@@ -159,6 +203,19 @@ export interface MercuryConfig {
       admins: SignalAccessUser[];
       members: SignalAccessUser[];
       pending: SignalPendingRequest[];
+    };
+    /**
+     * A one-way push channel (ADR-030): alerts are published to an ntfy topic, which the
+     * phone shows as a notification. Not a chat — nothing inbound is read.
+     */
+    ntfy: {
+      enabled: boolean;
+      url: string;
+      topic: string;
+      token?: string;
+      /** ntfy accepts 1-5 or min/low/default/high/urgent. */
+      priority: string;
+      tags: string;
     };
     discord: {
       enabled: boolean;
@@ -233,6 +290,16 @@ export interface MercuryConfig {
      * are clamped; anything non-numeric counts as 1.
      */
     cachedWeight?: number;
+    /**
+     * The context keeper (skindeepai/ctxkeeper policy): budgeted history with
+     * model-written notes and a verbatim archive, replacing the plain sliding
+     * window when a conversation overruns the budget. A cut that does not
+     * strictly shrink the view is refused, and the full history is sent
+     * instead. Off by default until the owner turns it on.
+     */
+    keeper?: {
+      enabled?: boolean;
+    };
   };
   subagents: {
     enabled: boolean;
@@ -303,6 +370,14 @@ export interface MercuryConfig {
     enabled: boolean;
     port: number;
     /**
+     * Interface the dashboard binds. Default `127.0.0.1` — the socket stays
+     * loopback and remote devices arrive through a local tunnel (Tailscale
+     * Serve). Only set this on a trusted network: the DNS-rebinding host
+     * check and the auth guard still apply, but the port becomes reachable
+     * by everything that can route to this machine.
+     */
+    host?: string;
+    /**
      * Extra browser origins allowed to call /api/* with a Bearer token
      * (CORS). Mercury Desktop's own origins are always allowed; list a
      * self-hosted web build or a dev server here. Never '*'.
@@ -338,6 +413,27 @@ function getEnv(key: string, fallback: string = ''): string {
 function getEnvNum(key: string, fallback: number): number {
   const val = process.env[key];
   return val ? parseInt(val, 10) : fallback;
+}
+
+/**
+ * `transport: compatible` in the environment, or `undefined` for the default
+ * (`openai`). An unrecognised value is refused here rather than silently ignored:
+ * a typo in `OPENAI_COMPAT_TRANSPORT=compat` would otherwise look like the
+ * endpoint simply has no thinking to give.
+ */
+/** A comma-separated env var as a list, trimmed, with the blanks dropped. */
+function listFromEnv(key: string): string[] {
+  return (process.env[key] ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function getEnvTransport(name: string): ProviderTransport | undefined {
+  const raw = getEnv(name, '').trim().toLowerCase();
+  if (raw === '') return undefined;
+  if (raw === 'openai' || raw === 'compatible') return raw;
+  throw new Error(`${name}="${raw}" — expected "openai" or "compatible"`);
 }
 
 function getEnvBool(key: string, fallback: boolean): boolean {
@@ -407,6 +503,28 @@ export function getDefaultConfig(): MercuryConfig {
         model: getEnv('OPENAI_MODEL', 'gpt-4o-mini'),
         enabled: getEnvBool('OPENAI_ENABLED', true),
       },
+      // OpenRouter is an OpenAI-compatible gateway over one key: the base URL is the whole
+      // difference, so it rides the same client as the other compat providers.
+      openrouter: {
+        name: 'openrouter',
+        apiKey: getEnv('OPENROUTER_API_KEY', ''),
+        baseUrl: getEnv('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1'),
+        model: getEnv('OPENROUTER_MODEL', ''),
+        enabled: getEnvBool('OPENROUTER_ENABLED', false),
+        // Left absent, not empty, when unset: the request then carries no
+        // routing block at all and the gateway picks the endpoint itself.
+        ...(() => {
+          const order = listFromEnv('OPENROUTER_PROVIDER');
+          const quantizations = listFromEnv('OPENROUTER_QUANTIZATIONS');
+          const routing = {
+            ...(order.length > 0 ? { order } : {}),
+            ...(quantizations.length > 0 ? { quantizations } : {}),
+            ...(order.length > 0 ? { allowFallbacks: false } : {}),
+          };
+          return Object.keys(routing).length > 0 ? { routing } : {};
+        })(),
+        vision: getEnvOptionalBool('OPENROUTER_VISION'),
+      },
       anthropic: {
         name: 'anthropic',
         apiKey: getEnv('ANTHROPIC_API_KEY', ''),
@@ -435,6 +553,7 @@ export function getDefaultConfig(): MercuryConfig {
         baseUrl: getEnv('ATLASCLOUD_BASE_URL', 'https://api.atlascloud.ai/v1'),
         model: getEnv('ATLASCLOUD_MODEL', 'qwen/qwen3.5-flash'),
         enabled: getEnvBool('ATLASCLOUD_ENABLED', true),
+        transport: getEnvTransport('ATLASCLOUD_TRANSPORT'),
       },
       runcrate: {
         name: 'runcrate',
@@ -456,6 +575,7 @@ export function getDefaultConfig(): MercuryConfig {
         baseUrl: getEnv('OLLAMA_CLOUD_BASE_URL', 'https://ollama.com/v1'),
         model: getEnv('OLLAMA_CLOUD_MODEL', 'gpt-oss:120b'),
         enabled: getEnvBool('OLLAMA_CLOUD_ENABLED', true),
+        transport: getEnvTransport('OLLAMA_CLOUD_TRANSPORT'),
       },
       ollamaLocal: {
         name: 'ollamaLocal',
@@ -463,6 +583,7 @@ export function getDefaultConfig(): MercuryConfig {
         baseUrl: getEnv('OLLAMA_LOCAL_BASE_URL', 'http://127.0.0.1:11434/v1'),
         model: getEnv('OLLAMA_LOCAL_MODEL', ''),
         enabled: getEnvBool('OLLAMA_LOCAL_ENABLED', false),
+        transport: getEnvTransport('OLLAMA_LOCAL_TRANSPORT'),
       },
       atomicChat: {
         name: 'atomicChat',
@@ -470,6 +591,7 @@ export function getDefaultConfig(): MercuryConfig {
         baseUrl: getEnv('ATOMIC_CHAT_BASE_URL', 'http://127.0.0.1:1337/v1'),
         model: getEnv('ATOMIC_CHAT_MODEL', ''),
         enabled: getEnvBool('ATOMIC_CHAT_ENABLED', false),
+        transport: getEnvTransport('ATOMIC_CHAT_TRANSPORT'),
       },
       openaiCompat: {
         name: 'openaiCompat',
@@ -478,7 +600,12 @@ export function getDefaultConfig(): MercuryConfig {
         model: getEnv('OPENAI_COMPAT_MODEL', ''),
         enabled: getEnvBool('OPENAI_COMPAT_ENABLED', false),
         vision: getEnvOptionalBool('OPENAI_COMPAT_VISION'),
+        transport: getEnvTransport('OPENAI_COMPAT_TRANSPORT'),
       },
+      // A copy of openaiCompat with OpenRouter's endpoint already in it: the
+      // gateway is OpenAI-compatible, so the only thing worth pinning is the
+      // URL, and a named slot keeps `openaiCompat` free for a local rig.
+
       mimo: {
         name: 'mimo',
         apiKey: getEnv('MIMO_API_KEY', ''),
@@ -500,6 +627,7 @@ export function getDefaultConfig(): MercuryConfig {
         baseUrl: getEnv('LM_STUDIO_BASE_URL', 'http://127.0.0.1:1234/v1'),
         model: getEnv('LM_STUDIO_MODEL', ''),
         enabled: getEnvBool('LM_STUDIO_ENABLED', false),
+        transport: getEnvTransport('LM_STUDIO_TRANSPORT'),
       },
       chatgptWeb: {
         name: 'chatgptWeb',
@@ -522,6 +650,7 @@ export function getDefaultConfig(): MercuryConfig {
         model: getEnv('LITELLM_MODEL', 'gpt-4o-mini'),
         enabled: getEnvBool('LITELLM_ENABLED', false),
         vision: getEnvOptionalBool('LITELLM_VISION'),
+        transport: getEnvTransport('LITELLM_TRANSPORT'),
       },
     },
     channels: {
@@ -547,6 +676,14 @@ export function getDefaultConfig(): MercuryConfig {
         admins: [],
         members: [],
         pending: [],
+      },
+      ntfy: {
+        enabled: getEnvBool('NTFY_ENABLED', false),
+        url: getEnv('NTFY_URL', 'https://ntfy.sh'),
+        topic: getEnv('NTFY_TOPIC', ''),
+        token: getEnv('NTFY_TOKEN', ''),
+        priority: getEnv('NTFY_PRIORITY', 'high'),
+        tags: getEnv('NTFY_TAGS', 'warning'),
       },
       discord: {
         enabled: getEnvBool('DISCORD_ENABLED', false),
@@ -649,6 +786,7 @@ export function getDefaultConfig(): MercuryConfig {
     web: {
       enabled: getEnvBool('MERCURY_WEB_ENABLED', false),
       port: getEnvNum('MERCURY_PORT', 6174),
+      host: getEnv('MERCURY_WEB_HOST', '') || undefined,
     },
   };
 }
@@ -872,6 +1010,11 @@ export function isProviderConfigured(provider: ProviderConfig): boolean {
     return provider.apiKey.length > 0 && provider.baseUrl.length > 0;
   }
   if (provider.name === 'atlascloud' || provider.name === 'runcrate' || provider.name === 'cloudgpu') {
+    return provider.apiKey.length > 0 && provider.baseUrl.length > 0 && provider.model.length > 0;
+  }
+  if (provider.name === 'openrouter') {
+    // A hosted gateway: keyless, it would answer 401 on every turn and read as
+    // a Mercury bug rather than a missing setting.
     return provider.apiKey.length > 0 && provider.baseUrl.length > 0 && provider.model.length > 0;
   }
   if (provider.name === 'openaiCompat' || provider.name === 'litellm') {

@@ -17,3 +17,4 @@ website/static/install.ps1
 # plugin-system tests (src/plugins/test-fixtures.ts)
 .vitest-tmp/
 .desktop-notes.tmp.md
+*.tgz

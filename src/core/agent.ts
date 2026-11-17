@@ -93,6 +93,9 @@ import {
 } from '../utils/config.js';
 import { fetchProviderModelCatalog, getPreferredModelsForProvider } from '../utils/provider-models.js';
 import { WorkLedger, type WorkEntry } from './work-ledger.js';
+import { ContextKeeper } from './context-keeper.js';
+import { keeperFor, makeNotesWriter, selectKeeperHistory, turnsOfSession, snapshotContext, compressNow, type ContextSnapshot, type KeeperSelection } from './context-keeper-agent.js';
+import type { SessionMessage } from '../sessions/types.js';
 import { MAX_PROVIDER_ATTEMPT_MS, MAX_AUTOMATIC_CONTINUATIONS, needsContinuationApproval, needsRetryApproval, withAbortDeadline } from './execution-limits.js';
 import { requiresFinalSend } from './response-delivery.js';
 import { updateCliProviderStatus } from './provider-status.js';
@@ -102,9 +105,8 @@ import { summarizeSilentTurn, type TurnAction } from './silent-turn.js';
 import { classifyStreamCompletion, isLengthTruncation, truncationContinuationPrompt, toolTruncationContinuationPrompt } from './stream-completion.js';
 import { MAX_EXECUTE_CONTINUATIONS, MAX_VERIFICATION_CONTINUATIONS, executeContinuationPrompt, shouldForceExecuteContinuation, isFailedToolResult, shouldRequireVerification, isVerificationOutputOk, verificationPrompt, responseAsksUser, EXECUTE_MUTATING_TOOLS, VERIFICATION_COMMAND_PATTERN, wakeUpPrompt, chatNeedsCheck, chatCheckPrompt } from './execute-guard.js';
 import { classifyTurnEnd, stepsExhaustedPrompt, STEPS_PAUSED_BANNER, WORK_NOT_STARTED_BANNER, VERIFICATION_FAILED_BANNER, type LoopEndCause } from './completion-verdict.js';
-import { HISTORY_TOKEN_BUDGET, HISTORY_TOKEN_BUDGET_SAVER, TOOL_TRACE_KIND, selectHistoryWindow, buildModelHistory, withReasoningParts, formatToolTrace, formatToolTraceLine, summarizeToolArgs, summarizeToolResult, detectRepetitionLoop } from './context-window.js';
-import { buildSystemPrompt as assembleSystemPrompt, buildSystemPromptParts, budgetContext, type SystemPromptInputs } from './system-prompt.js';
-import { buildStatusVerbPrompt, parseStatusVerbs, shouldRefreshStatusVerbs } from './status-verbs.js';
+import { HISTORY_TOKEN_BUDGET, HISTORY_TOKEN_BUDGET_SAVER, TOOL_TRACE_KIND, selectHistoryWindow, buildModelHistory, toModelMessage, withReasoningParts, formatToolTrace, formatToolTraceLine, formatContextCompressionReport, summarizeToolArgs, summarizeToolResult, detectRepetitionLoop } from './context-window.js';
+import { buildSystemPrompt as assembleSystemPrompt, buildSystemPromptParts, budgetContext, type SystemPromptInputs } from './system-prompt.js';import { buildStatusVerbPrompt, parseStatusVerbs, shouldRefreshStatusVerbs } from './status-verbs.js';
 import { verbPoolFor } from '../ui/status-word.js';
 import { StallWatchdog } from './stall-watchdog.js';
 import { setProgressPulse } from './progress-pulse.js';
@@ -127,6 +129,7 @@ import { formatCounts, formatLearnedLine } from './commands/memory-commands.js';
 import { handleBgCommand as handleBgCommandImpl } from './commands/bg-command.js';
 import { handleSaverCommand as handleSaverCommandImpl } from './commands/saver-command.js';
 import { handleSessionCommand as handleSessionCommandImpl } from './commands/session-command.js';
+import { handleCompactCommand as handleCompactCommandImpl } from './commands/compact-command.js';
 import { handleFastPathCommand as handleFastPathCommandImpl } from './commands/fast-path-command.js';
 import { openCliMemoryMenu as openCliMemoryMenuImpl } from './commands/cli-memory-menu.js';
 import { openMemoryChoiceMenu as openMemoryChoiceMenuImpl } from './commands/memory-choice-menu.js';
@@ -2327,6 +2330,12 @@ export class Agent {
     const pendingBot = (channel as any).consumePendingBotChatTarget?.() ?? null;
     const inBotChat = pendingBot === botId;
     const replyTarget = inBotChat ? `bot:${botId}` : msg.channelId;
+    // A slash command typed in the bot's own conversation is answered there
+    // directly (the hook), never as a turn; /bot <id> /@bot from elsewhere
+    // keeps sending the text to the model as before.
+    if (inBotChat && await bm.answerSlash(botId, message, { channelType: msg.channelType, channelId: replyTarget })) {
+      return;
+    }
     const result = bm.enqueue(botId, {
       trigger: 'chat',
       prompt: message,
@@ -3876,10 +3885,96 @@ export class Agent {
       // ten messages, and includes the compact tool trace written at the end
       // of each turn, so this turn remembers what the previous one read and
       // wrote instead of starting blind.
-      const recentMemory = selectHistoryWindow(
-        activeSession.messages,
-        this.saverMode.isActive() ? HISTORY_TOKEN_BUDGET_SAVER : HISTORY_TOKEN_BUDGET,
-      );
+      // The keeper (config `tokens.keeper.enabled`) replaces the plain
+      // sliding window when it is on: budgeted history with model-written
+      // notes and a verbatim archive instead of silent amnesia. A refused cut
+      // falls back to the window — the full history rather than a lying
+      // compression, which is the gate's whole point.
+      let recentMemory: SessionMessage[];
+      if (this.config.tokens?.keeper?.enabled) {
+        const keeperTurns = turnsOfSession(activeSession.messages);
+        // The window is the repli, decided up front: a keeper that cannot make
+        // a cut (no notes writer, refused layout) must not silently send a
+        // half-selected history either.
+        const fallbackWindow = () =>
+          selectHistoryWindow(
+            activeSession.messages,
+            this.saverMode.isActive() ? HISTORY_TOKEN_BUDGET_SAVER : HISTORY_TOKEN_BUDGET,
+          );
+        const kept = await selectKeeperHistory(
+          this.keeperForSession(canonicalSession.id),
+          keeperTurns,
+          makeNotesWriter(() => {
+            try {
+              return this.learningProviders().getDefault().getModelInstance();
+            } catch {
+              return null;
+            }
+          }),
+        );
+        if (kept.outcome === 'fits' || kept.outcome === 'too_short') {
+          recentMemory = fallbackWindow();
+        } else if (kept.outcome === 'cut') {
+          const eligible = activeSession.messages.filter(
+            (m) => (m.role === 'user' || m.role === 'assistant') && (m.kind === 'message' || m.kind === 'tool-call'),
+          );
+          // The keeper numbered itself over the same eligible list; map back by
+          // position (the notes turn is keeper material, added as a block).
+          const keepNumbers = new Set(kept.turns.filter((t) => t.number >= 0).map((t) => t.number));
+          recentMemory = eligible.filter((_, i) => keepNumbers.has(i));
+          const notesTurn = kept.turns.find((t) => t.number < 0);
+          if (notesTurn) {
+            recentMemory = [
+              {
+                id: 'keeper-notes',
+                sessionId: canonicalSession.id,
+                role: 'user',
+                kind: 'message',
+                content: notesTurn.content,
+                timestamp: Date.now(),
+                sequence: recentMemory.length ? recentMemory[recentMemory.length - 1].sequence + 1 : 0,
+              },
+              ...recentMemory,
+            ];
+          }
+          // The cut is an event, announced in the trace's own vocabulary: a
+          // `tool-call` entry whose one line reads like a `run_command` line,
+          // under its own header. Any client that draws a tool block draws it
+          // (and the compression stays in the session's own history).
+          this.sessions.appendMessage(canonicalSession.id, {
+            role: 'assistant',
+            kind: TOOL_TRACE_KIND,
+            content: formatContextCompressionReport(kept.report ?? { beforeTokens: 0, afterTokens: 0, removedTurns: 0 }, this.keeperForSession(canonicalSession.id).lastArchivedNumber),
+            externalMessageId: `${msg.id}:context-compression`,
+            metadata: {
+              channelType: msg.channelType,
+              channelId: msg.channelId,
+              event: 'context_compression',
+              ...(kept.report ? { contextCompression: kept.report } : {}),
+            },
+          });
+          // A live screen should see it happen, not only read it back: the
+          // web channel gets the same event as a notice on its SSE stream.
+          if (msg.channelType !== 'internal' && kept.report) {
+            const ch = this.channels.getChannelForMessage(msg);
+            if (ch instanceof WebChannel) {
+              ch.sendNotice(
+                `context_compression: ${kept.report.removedTurns} turns archived, ${kept.report.beforeTokens} → ${kept.report.afterTokens} tokens`,
+                msg.channelId,
+              );
+            }
+          }
+        } else {
+          // notes_rejected: the gate refused the compression — send the
+          // budgeted window, never a view the keeper did not vouch for.
+          recentMemory = fallbackWindow();
+        }
+      } else {
+        recentMemory = selectHistoryWindow(
+          activeSession.messages,
+          this.saverMode.isActive() ? HISTORY_TOKEN_BUDGET_SAVER : HISTORY_TOKEN_BUDGET,
+        );
+      }
 
       const history = buildModelHistory(recentMemory);
       const messages: any[] = [...history.messages];
@@ -5890,6 +5985,61 @@ export class Agent {
    * when it names a usable provider, else the chat default. Resolved per call so
    * a key added at runtime or a changed default is picked up.
    */
+  /**
+   * One keeper per conversation, for the process lifetime: the notes live in
+   * memory, the archive on disk (`keeperFor` reloads it). A saver-mode flip
+   * rebuilds it with the saver budget — the archive carries over untouched.
+   */
+  private keeperForSession(sessionId: string): ContextKeeper {
+    const saver = this.saverMode.isActive();
+    const key = `${sessionId}:${saver ? 'saver' : 'std'}`;
+    let keeper = this.keepers.get(key);
+    if (!keeper) {
+      keeper = keeperFor(sessionId, saver);
+      this.keepers.set(key, keeper);
+    }
+    return keeper;
+  }
+  private readonly keepers = new Map<string, ContextKeeper>();
+
+  /**
+   * The context state of one conversation for the web API (GET /api/context):
+   * the same live keeper the turn loop uses, read without touching it.
+   */
+  keeperForInspection(sessionId: string): ContextKeeper {
+    return this.keeperForSession(sessionId);
+  }
+
+  contextSnapshot(sessionId: string): ContextSnapshot {
+    const session = this.sessions.get(sessionId);
+    return snapshotContext(
+      this.keeperForSession(session.id),
+      session.messages,
+      !!this.config.tokens?.keeper?.enabled,
+      this.saverMode.isActive(),
+    );
+  }
+
+  /**
+   * Force a keeper cut now for one conversation (POST /api/context/compress):
+   * notes first, archive verbatim, and the gate — a cut that would not
+   * strictly shrink the view is refused and nothing changes.
+   */
+  async compressSessionContext(sessionId: string): Promise<KeeperSelection> {
+    const session = this.sessions.get(sessionId);
+    return compressNow(
+      this.keeperForSession(session.id),
+      session.messages,
+      makeNotesWriter(() => {
+        try {
+          return this.learningProviders().getDefault().getModelInstance();
+        } catch {
+          return null;
+        }
+      }),
+    );
+  }
+
   private learningProviders(): { getDefault(): ReturnType<ProviderRegistry['getDefault']> } {
     return {
       getDefault: () => {
@@ -6713,6 +6863,29 @@ Is this productive iteration or a stuck loop?`,
 
   async handleSessionCommand(content: string, channelType: ChannelType, channelId: string): Promise<void> {
     return handleSessionCommandImpl(this, content, channelType, channelId);
+  }
+
+  /**
+   * The keeper switch from `/compact on|off`: live on the running agent (the
+   * switch is consulted per turn) and written to mercury.yaml, so it survives
+   * the next restart — the same contract as PUT /api/context.
+   */
+  setKeeperEnabled(enabled: boolean): void {
+    this.config.tokens = this.config.tokens ?? {};
+    this.config.tokens.keeper = { ...this.config.tokens.keeper, enabled };
+    try {
+      const fresh = loadConfig();
+      fresh.tokens = fresh.tokens ?? {};
+      fresh.tokens.keeper = { ...fresh.tokens.keeper, enabled };
+      saveConfig(fresh);
+    } catch (err) {
+      logger.warn({ err }, 'keeper switch: could not persist to mercury.yaml');
+    }
+  }
+
+  /** `/compact` — the context gauge, a manual keeper cut, the keeper switch. */
+  async handleCompactCommand(msg: ChannelMessage): Promise<void> {
+    return handleCompactCommandImpl(this, msg);
   }
 
   private scheduleSessionTitleGeneration(sessionId: string, providerName: string): void {

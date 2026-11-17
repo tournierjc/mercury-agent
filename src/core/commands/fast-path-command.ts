@@ -25,6 +25,11 @@ export async function handleFastPathCommand(agent: Agent, msg: ChannelMessage): 
     return;
   }
 
+  if (trimmed === '/compact' || trimmed.startsWith('/compact ')) {
+    await agent.handleCompactCommand(msg);
+    return;
+  }
+
   if (trimmed === '/agents' || trimmed === '/status') {
     if (agent.supervisor) {
       const agents = agent.supervisor.getActiveAgents();

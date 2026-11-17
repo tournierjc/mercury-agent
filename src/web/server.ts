@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { logger } from '../utils/logger.js';
 import { authGuard, errorHandler } from './middleware.js';
 import { apiCors } from './cors.js';
-import { initWebAuth, getWebPort } from './auth.js';
+import { initWebAuth, getWebPort, getWebHost } from './auth.js';
 import { loadConfig } from '../utils/config.js';
 import authRoutes from './api/auth.js';
 import statusRoutes, { updateStatus } from './api/status.js';
@@ -17,6 +17,7 @@ import cloudRoutes from './api/cloud.js';
 import transcribeRoutes from './api/transcribe.js';
 import speakRoutes from './api/speak.js';
 import budgetRoutes, { setBudgetControls } from './api/budget.js';
+import contextRoutes, { setContextControls } from './api/context.js';
 import channelRoutes from './api/channels.js';
 import artifactRoutes from './api/artifacts.js';
 import configRoutes from './api/config.js';
@@ -26,6 +27,7 @@ import chatRoutes, { setWebChannel, setProgrammingMode, setModelSwitchCallback, 
 import suggestionRoutes from './api/suggestions.js';
 import agentRoutes, { setAgentSupervisor, setBackgroundTaskManager } from './api/agents.js';
 import botsRoutes, { setBotManager, setBotsWebhookSecret } from './api/bots.js';
+import sandboxRoutes from './api/sandbox.js';
 import spotifyRoutes, { setSpotifyClient } from './api/spotify.js';
 import kanbanRoutes, { setKanbanSupervisor, setKanbanBoardManager, setKanbanProviders } from './api/kanban.js';
 import ideRoutes, { setIDEProviders } from './api/workspace-ide.js';
@@ -44,6 +46,7 @@ import { isBetterSqlite3Available } from '../memory/second-brain-db.js';
 
 export { setSessionRepository };
 export { setBudgetControls };
+export { setContextControls };
 export { setSessionSyncEnabledCallback };
 
 const app = new Hono();
@@ -102,8 +105,14 @@ app.use('*', async (c, next) => {
   c.res.headers.set('X-Content-Type-Options', 'nosniff');
   c.res.headers.set('Referrer-Policy', 'no-referrer');
   if ((c.res.headers.get('Content-Type') ?? '').startsWith('text/html')) {
-    c.res.headers.set('X-Frame-Options', 'DENY');
-    if (!c.res.headers.has('Content-Security-Policy')) c.res.headers.set('Content-Security-Policy', "frame-ancestors 'none'");
+    // A page that names its own ancestors has already answered the question, and every browser
+    // that reads `frame-ancestors` ignores `X-Frame-Options` when it is present. Sending both
+    // would make the pair contradict itself the moment a route allows a frame.
+    const csp = c.res.headers.get('Content-Security-Policy') ?? '';
+    if (!/frame-ancestors/i.test(csp)) {
+      c.res.headers.set('X-Frame-Options', 'DENY');
+      if (!csp) c.res.headers.set('Content-Security-Policy', "frame-ancestors 'none'");
+    }
   }
 });
 // Sign-in bodies are tiny: refuse big ones before reading them (they arrive without a credential).
@@ -124,6 +133,7 @@ app.route('/', transcribeRoutes);
 app.route('/', speakRoutes);
 app.route('/', mediaRoutes);
 app.route('/', budgetRoutes);
+app.route('/', contextRoutes);
 app.route('/', channelRoutes);
 app.route('/', artifactRoutes);
 app.route('/', suggestionRoutes);
@@ -133,6 +143,8 @@ app.route('/', brainRoutes);
 app.route('/', chatRoutes);
 app.route('/', agentRoutes);
 app.route('/', botsRoutes);
+app.route('/', sandboxRoutes);
+export { setSandboxTools } from './api/sandbox.js';
 app.route('/', spotifyRoutes);
 app.route('/', kanbanRoutes);
 app.route('/', ideRoutes);
@@ -301,6 +313,7 @@ process.on('unhandledRejection', (reason: any) => {
 
 export function startWebServer(): { port: number; url: string } {
   const port = getWebPort();
+  const host = getWebHost();
   initWebAuth();
   // Devices from before idle expiry start their clock now (they keep working).
   try { migrateDevices(); } catch { /* checked again next start */ }
@@ -320,7 +333,7 @@ export function startWebServer(): { port: number; url: string } {
       // A previous instance shutting down keeps the port for a moment;
       // retry before declaring the dashboard unavailable.
       bindAttempts++;
-      setTimeout(() => server.listen(port, '127.0.0.1'), 500);
+      setTimeout(() => server.listen(port, host), 500);
       return;
     }
     if (err?.code === 'EADDRINUSE') {
@@ -333,8 +346,8 @@ export function startWebServer(): { port: number; url: string } {
     }
   });
 
-  server.listen(port, '127.0.0.1', () => {
-    logger.info(`Web dashboard: http://127.0.0.1:${port}`);
+  server.listen(port, host, () => {
+    logger.info(`Web dashboard: http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`);
   });
 
   return { port, url: `http://127.0.0.1:${port}` };

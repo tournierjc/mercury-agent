@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import system, { setScheduler } from './system.js';
-import status, { getStatus, updateStatus } from './status.js';
+import status, { updateStatus } from './status.js';
 import type { Scheduler } from '../../core/scheduler.js';
 
 /**
@@ -46,6 +46,9 @@ describe('GET /api/status', () => {
   });
 });
 
+/** The budget a bare test runtime starts with, so a test can restore it. */
+const otherwiseDefaultBudget = () => 1_000_000;
+
 describe('GET /api/usage', () => {
   it('is available when the tracker holds a real record', async () => {
     writeUsage({
@@ -57,20 +60,29 @@ describe('GET /api/usage', () => {
       ],
     });
 
-    // A live budget announced by the runtime wins over the tracker's snapshot, so this case pins
-    // the fallback: nobody announced one (`tokenBudget: 0`), and the file is the answer. The live
-    // case has its own tests in usage-budget.test.ts.
-    const live = getStatus().tokenBudget;
-    updateStatus({ tokenBudget: 0 });
-    try {
-      const res = await system.request('/api/usage');
-      const body = (await res.json()) as Record<string, unknown>;
+    const res = await system.request('/api/usage');
+    const body = (await res.json()) as Record<string, unknown>;
 
-      expect(body.available).toBe(true);
-      expect(body.dailyUsed).toBe(1234);
-      expect(body.dailyBudget).toBe(80000000);
+    expect(body.available).toBe(true);
+    expect(body.dailyUsed).toBe(1234);
+    // The live budget wins over the snapshot in the file; here they agree.
+    expect(body.dailyBudget).toBe(otherwiseDefaultBudget());
+  });
+
+  it('reports the budget the runtime enforces, not the snapshot in the tracker', async () => {
+    // The case that bit: the owner raised the limit, the file still carried the old number, and the
+    // console showed a budget (and a `remaining`) nothing was enforcing.
+    writeUsage({ dailyUsed: 152_867_556, dailyBudget: 80_000_000, lastResetDate: '2026-10-28', requestLog: [] });
+    updateStatus({ tokenBudget: 500_000_000 });
+
+    const res = await system.request('/api/usage');
+    const body = (await res.json()) as Record<string, unknown>;
+
+    try {
+      expect(body.dailyBudget).toBe(500_000_000);
+      expect(body.remaining).toBe(500_000_000 - 152_867_556);
     } finally {
-      updateStatus({ tokenBudget: live });
+      updateStatus({ tokenBudget: otherwiseDefaultBudget() });
     }
   });
 

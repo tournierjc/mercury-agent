@@ -7,6 +7,7 @@ import type { Tool } from 'ai';
 import type { ChannelAttachment } from '../types/channel.js';
 import type { MercuryConfig } from '../utils/config.js';
 import type { ProviderRegistry } from '../providers/registry.js';
+import type { BaseProvider } from '../providers/base.js';
 import type { TokenBudget } from '../utils/tokens.js';
 import type { CapabilityRegistry } from '../capabilities/registry.js';
 import type { UserMemoryStore } from '../memory/user-memory.js';
@@ -14,8 +15,7 @@ import { UserMemoryStore as UserMemoryStoreImpl } from '../memory/user-memory.js
 import { BotInbox } from './inbox.js';
 import { BotApprovals, durableGrant } from './approvals.js';
 import { detectTier } from './permission-tiers.js';
-import { BotStore, deliverableFileName, BOT_JOURNAL_FILENAME, BOT_PERMISSIONS_FILENAME, isValidCronExpression, MAX_FLEET_DEPTH, BOT_SHARED_SANDBOX_DIRNAME } from './store.js';
-import { BotJournal, type BotTranscript, type BotUsage } from './journal.js';
+import { BotStore, deliverableFileName, BOT_JOURNAL_FILENAME, BOT_PERMISSIONS_FILENAME, isValidCronExpression, MAX_FLEET_DEPTH, BOT_SHARED_SANDBOX_DIRNAME } from './store.js';import { BotJournal, type BotTranscript, type BotUsage } from './journal.js';
 import { BotQueue, idempotencyKeyFor, LEASE_SECONDS, type DurableBotJob } from './queue.js';
 import { sweepSharedSandbox } from './retention.js';
 import { planBotShape, proposeCrew, type BotShapePlan } from './fleet-onboarding.js';
@@ -38,13 +38,19 @@ import { synthesizeSkill, MIN_TOOLS_FOR_SYNTHESIS } from './skill-synthesis.js';
 import { SkillLoader } from '../skills/loader.js';
 import { logger } from '../utils/logger.js';
 import { resolveToolPath, type CwdSource } from '../capabilities/filesystem/resolve-path.js';
-import type {
+import { estimateTokens } from '../core/context-window.js';import type {
   BotLiveState,
   BotManifest,
   BotRunRecord,
   BotStatusSummary,
   BotTrigger,
 } from './types.js';
+
+/**
+ * How much of a turn's answer the journal keeps. Enough for a full chat answer (the transcript
+ * has the rest); the file is JSONL per bot, so this bounds growth without truncating replies.
+ */
+const JOURNAL_SUMMARY_MAX = 8000;
 
 export interface BotJob {
   id: string;
@@ -57,6 +63,8 @@ export interface BotJob {
   source?: { channelType: string; channelId: string };
   /** Photos/PDFs to hand the turn; `web/api/uploads.ts` already wrote them to disk. */
   attachments?: ChannelAttachment[];
+  /** 'chat' answers the owner in the app; 'work' (default) delivers. */
+  mode?: 'work' | 'chat';
   createdAt: number;
   attempts: number;
   /** Scheduler task id for cron runs (routine gating + no-outcome streaks). */
@@ -239,6 +247,13 @@ export class BotManager {
   /** Fleet-wide daily usage and pause (ADR-020). */
   private fleetDailyTokens: { day: string; tokens: number } = { day: '', tokens: 0 };
   private fleetPausedDay: string | null = null;
+  /**
+   * Why the budget pause is day-stamped and not a bare flag: the pause is a decision
+   * about ONE day's spend. A restart in the middle of that day re-reads today's counters
+   * and must re-pause if the cap is still reached — but a pause raised yesterday must die
+   * with the day it belonged to. A bare flag survived restarts forever and read to the
+   * owner as 'budget 0 = 0 left, nothing runs' with no way to tell it from a live cap.
+   */
   /** routine key → when its last run ended (min-interval gate). */
   private routineLastEnd: Map<string, number> = new Map();
   /** botId → UTC day a turn-limit notice was sent (once a day, not per run). */
@@ -375,7 +390,7 @@ export class BotManager {
   private runTaint = new Map<string, BotTaint>();
 
   /** What each running job was asked, by whom, for the live feed (set when the turn starts). */
-  private jobContext = new Map<string, { trigger: string; prompt: string; fromBot?: string }>();
+  private jobContext = new Map<string, { trigger: BotTrigger; prompt: string; fromBot?: string }>();
   /**
    * The live feed's short memory: recent events across the fleet, so a
    * screen opened mid-run shows what already happened. In memory only and
@@ -400,6 +415,26 @@ export class BotManager {
     return out.slice(-Math.max(1, Math.min(opts.limit ?? 400, LIVE_EVENTS)));
   }
 
+  /** Roster-change listeners: a client stream re-sends the snapshot when a bot's state moves. */
+  private rosterListeners = new Set<() => void>();
+  onRosterChange(listener: () => void): () => void {
+    this.rosterListeners.add(listener);
+    return () => this.rosterListeners.delete(listener);
+  }
+
+  /**
+   * Announces that the roster moved, so every feed re-sends a fresh snapshot.
+   *
+   * A `needsYou` that flips off used to be silence: the manager set the flag, the journal
+   * recorded it, and no `bot_roster` frame ever followed — the phone kept the card ("needs
+   * you") raised until its process died, because the diff it reads needs a push to see the
+   * change. Every state transition that a client's badge reads goes through here.
+   */
+  private announceRosterChange(): void {
+    for (const listener of this.rosterListeners) {
+      try { listener(); } catch { /* a dead client must not break the others */ }
+    }
+  }
   private emitBotActivity(ev: BotActivityEvent): void {
     const ctx = ev.jobId ? this.jobContext.get(ev.jobId) : undefined;
     ev = {
@@ -496,8 +531,119 @@ export class BotManager {
     return this.journalFor(botId);
   }
 
-  enqueue(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; attachments?: ChannelAttachment[]; manualReplay?: boolean; taint?: BotTaint }): { jobId: string; accepted: boolean; reasonCode?: string; duplicated?: boolean } {
-    const manifest = this.store.get(botId);
+  private getSlashHook?: (
+    botId: string,
+    text: string,
+    deliver: (message: string) => Promise<void>,
+  ) => Promise<boolean>;
+
+  /**
+   * Slash commands for bot threads, wired by the host (index.ts): a
+   * recognized command is answered before the job is queued, so the owner
+   * typing `/compact` in a bot conversation gets the same deterministic
+   * answer as in the main chat. The hook returns true when it answered.
+   */
+  setSlashHook(hook: (botId: string, text: string, deliver: (message: string) => Promise<void>) => Promise<boolean>): void {
+    this.getSlashHook = hook;
+  }
+
+  /**
+   * A slash command typed into a bot thread: ask the host, and if it owns the
+   * command deliver its answer into the thread instead of queueing a turn.
+   * Returns true when the message was answered and must not run as a job.
+   * `source` is the remote surface the message came from, when any.
+   */
+  async answerSlash(botId: string, text: string, source?: { channelType: string; channelId: string }): Promise<boolean> {
+    if (!this.getSlashHook || !text.trim().startsWith('/')) return false;
+    const thread = `bot:${botId}`;
+    const answers: string[] = [];
+    const deliver = async (message: string): Promise<void> => {
+      answers.push(message);
+      await this.notify?.('cli', thread, message).catch(() => {});
+      if (source && source.channelId !== thread) {
+        await this.notify?.(source.channelType, source.channelId, message).catch(() => {});
+      }
+    };
+    try {
+      const answered = await this.getSlashHook(botId, text, deliver);
+      if (answered) this.recordDirectAnswer(botId, text.trim(), answers.join('\n\n'));
+      return answered;
+    } catch {
+      return false; // a failing hook must never swallow the owner's message
+    }
+  }
+
+  /**
+   * Post the answer of a daemon-answered command into a bot's own thread —
+   * the same delivery surface as a run result, without running a turn.
+   */
+  async notifyBotThread(botId: string, message: string): Promise<void> {
+    await this.notify?.('cli', `bot:${botId}`, message).catch(() => {});
+  }
+
+  /**
+   * What the owner's conversation with this bot costs the model, in tokens,
+   * from the bot's durable history (the transcripts the app rebuilds the
+   * thread from). A bot's turns run outside the session store — runBotTurn
+   * starts fresh every run — so the thread's session is empty by design, and
+   * the gauge for a bot conversation is read here instead.
+   */
+  threadHistoryTokens(botId: string): { tokens: number; turns: number } {
+    try {
+      const journal = this.journalFor(botId);
+      let tokens = 0;
+      let turns = 0;
+      for (const entry of journal.listTranscripts(botId)) {
+        const t = journal.readTranscript(botId, entry.runId);
+        if (!t) continue;
+        turns += 1;
+        tokens += estimateTokens(t.prompt) + estimateTokens(t.output);
+      }
+      return { tokens, turns };
+    } catch {
+      return { tokens: 0, turns: 0 };
+    }
+  }
+
+  async enqueueAsync(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; attachments?: ChannelAttachment[]; mode?: 'work' | 'chat' }): Promise<{ jobId: string; accepted: boolean; reasonCode?: string; duplicated?: boolean }> {
+    // Slash commands first, only for the owner's own messages (chat/api
+    // triggers): bot-to-bot mail and cron prompts can legitimately start
+    // with "/" and must reach the model. A command answered without a turn
+    // still appears in the journal as a direct answer, so the thread reads
+    // as a conversation (prompt and output come from the run transcript).
+    if ((job.trigger === 'chat' || job.trigger === 'api') && !job.fromBot && !job.attachments?.length) {
+      if (await this.answerSlash(botId, job.prompt, job.source)) {
+        return { jobId: '', accepted: true, duplicated: false };
+      }
+    }
+    return this.enqueue(botId, job);
+  }
+
+  /** The journal line + transcript for a command answered without a turn (the app reads prompt/output from the transcript). */
+  private recordDirectAnswer(botId: string, prompt: string, output: string): void {
+    try {
+      const now = Date.now();
+      const record: BotRunRecord = {
+        runId: `slash-${now.toString(36)}`,
+        botId,
+        trigger: 'chat',
+        state: 'completed',
+        startedAt: now,
+        durationMs: 0,
+        tokensIn: 0,
+        tokensOut: 0,
+        outcome: 'message',
+        report: 'result',
+        complete: true,
+        summary: output.slice(0, 300),
+      };
+      const journal = this.journalFor(botId);
+      journal.append(record);
+      journal.writeTranscript(record, { prompt, output, trace: [] });
+    } catch { /* journaling must never fail an answered command */ }
+  }
+
+  enqueue(botId: string, job: { trigger: BotTrigger; prompt: string; fromBot?: string; source?: { channelType: string; channelId: string }; attempts?: number; routineId?: string; attachments?: ChannelAttachment[]; manualReplay?: boolean; taint?: BotTaint; mode?: 'work' | 'chat' }): { jobId: string; accepted: boolean; reasonCode?: string; duplicated?: boolean } {    const manifest = this.store.get(botId);
     if (!manifest) return { jobId: '', accepted: false, reasonCode: 'target_unknown' };
     if (!manifest.enabled || this.disabled.has(botId)) return { jobId: '', accepted: false, reasonCode: 'target_disabled' };
 
@@ -542,6 +688,7 @@ export class BotManager {
       fromBot: job.fromBot,
       source: job.source,
       attachments: job.attachments,
+      mode: job.mode,
       attempts: job.attempts ?? 0,
       createdAt: Date.now(),
       idempotencyKey: idempotencyKeyFor(botId, job.trigger, job.prompt, job.fromBot, job.attachments),
@@ -550,7 +697,10 @@ export class BotManager {
       return { jobId: durable.job.id, accepted: true, duplicated: true };
     }
     const id = durable.job.id;
-    queue.push({ id, botId, trigger: job.trigger, prompt: job.prompt, fromBot: job.fromBot, source: job.source, createdAt: durable.job.createdAt, attempts: durable.job.attempts, routineId: job.routineId });
+    // `mode` travels with the in-memory job too: the durable record and the queue are two
+    // copies of the same job, and a field forgotten in one of them silently turns a chat turn
+    // back into a work turn (which is how a teammate answered "Nothing to do" to a question).
+    queue.push({ id, botId, trigger: job.trigger, prompt: job.prompt, fromBot: job.fromBot, source: job.source, mode: job.mode, attachments: job.attachments, createdAt: durable.job.createdAt, attempts: durable.job.attempts, routineId: job.routineId });
     // Before the pump: an idle bot starts the job right away.
     if (job.taint) this.jobTaint.set(id, job.taint);
     this.pump(botId);
@@ -908,6 +1058,14 @@ export class BotManager {
       this.activity.set(botId, 'Paused — daily token budget reached');
       return;
     }
+    // A fleet pause belongs to the day that raised it: if the fleet counter is no
+    // longer today's (a restart after midnight, the day the sweep missed), the pause
+    // is stale — clear it instead of holding every bot forever on a spent day.
+    if (this.fleetPausedDay && this.fleetPausedDay !== today) this.fleetPausedDay = null;
+    if (this.fleetDailyTokens.day && this.fleetDailyTokens.day !== today) {
+      this.fleetDailyTokens = { day: '', tokens: 0 };
+      this.fleetPausedDay = null;
+    }
     if (this.fleetPausedDay === today) {
       this.activity.set(botId, 'Paused — fleet daily token budget reached');
       return;
@@ -955,6 +1113,33 @@ export class BotManager {
     const own = manifest.autonomy?.dailyTokenBudget;
     if (own !== undefined) return own;
     return this.config.bots?.suggestedDailyTokenBudget ?? 5_000_000;
+  }
+
+  /**
+   * Release a budget pause the current cap no longer justifies. Every route that
+   * raises a ceiling ('/bots budget', PUT autonomy, the budget console) must call
+   * this: a bot stopped at 5M that is given 50M today has reached nothing, and
+   * leaving it in pausedForBudget until midnight was the 'cap 0/0 but still
+   * paused, nothing runs' bug. 0 = unlimited, so it releases too.
+   */
+  releaseBudgetPauseIfUnderCap(botId: string): void {
+    const manifest = this.store.get(botId);
+    if (!manifest) return;
+    const cap = this.dailyCapFor(manifest);
+    if (cap <= 0 || this.dailyUsage(botId).tokens < cap) this.pausedForBudget.delete(botId);
+  }
+
+  /**
+   * Raise a bot's daily cap (the PUT /api/bots/:id autonomy path; the chat route
+   * updates the manifest then calls the release above).
+   */
+  setDailyTokenBudget(botId: string, budget: number): void {
+    const manifest = this.store.get(botId);
+    if (!manifest) return;
+    manifest.autonomy = { ...(manifest.autonomy ?? {}), dailyTokenBudget: budget };
+    this.store.save(manifest);
+    this.releaseBudgetPauseIfUnderCap(botId);
+    logger.info({ botId, budget }, 'Bot daily token budget updated');
   }
 
   /** Today's spend for /bots and the API. */
@@ -1045,7 +1230,10 @@ export class BotManager {
         durationMs: Date.now() - job.createdAt,
         tokensIn: output.tokensIn,
         tokensOut: output.tokensOut,
-        summary: output.output.slice(0, 300),
+        // The whole answer, not a teaser: a client that cannot fetch the transcript (a race at
+        // turn end, an offline phone) must still show what the bot said. 300 characters cut
+        // answers mid-sentence and made a delivered answer look like it had vanished.
+        summary: output.output.slice(0, JOURNAL_SUMMARY_MAX),
         ...(output.report ? { report: output.report.kind, ...(output.report.complete ? { complete: true } : {}) } : {}),
         error: output.error,
         reasonCode: output.reasonCode,
@@ -1062,9 +1250,15 @@ export class BotManager {
       };
       const journal = this.journalFor(botId);
       journal.append(record);
-      journal.writeTranscript(record, { prompt: job.prompt, output: output.output, trace: output.trace });
+      journal.writeTranscript(record, {
+        prompt: job.prompt,
+        output: output.output,
+        trace: output.trace,
+        reasoning: output.reasoning,
+      });
       this.lastRun.set(botId, { at: Date.now(), state: record.state });
       this.needsYou.delete(botId);
+      this.announceRosterChange();
       this.recordBotTokens(botId, manifest, output.tokensIn + output.tokensOut);
       // Did this run fail for good (not a retry, not a policy cut-off)? Either the
       // turn died, or the bot itself reported that it couldn't do the job.
@@ -1175,6 +1369,7 @@ export class BotManager {
         this.store.clearCheckpoint(botId, job.id);
         this.jobDepth.delete(job.id);
         this.needsYou.add(botId);
+        this.announceRosterChange();
         logger.warn({ botId, jobId: job.id, reasonCode: output.reasonCode }, 'Bot turn failed permanently — moved to DLQ (replayable via /bots dlq)');
         // A routine failing again and again tells the owner once, on the first
         // failure; the streak switches it off after ROUTINE_FAIL_OFF_AFTER.
@@ -1340,6 +1535,7 @@ export class BotManager {
         needsYou: true,
       });
       this.needsYou.add(botId);
+      this.announceRosterChange();
     } finally {
       if (heartbeat) clearInterval(heartbeat);
       running.delete(job.id);
@@ -1397,6 +1593,7 @@ export class BotManager {
       input: {
         manifest,
         trigger: job.trigger,
+        mode: job.mode,
         prompt: job.prompt,
         attachments: job.attachments,
         persona: this.store.readPersona(botId),
@@ -1404,7 +1601,11 @@ export class BotManager {
         pollMail: () => this.drainMailbox(botId),
         sandbox: { workspace: this.store.sandboxDir(botId), shared: this.store.sharedSandboxDir() },
         deliverablesDir: this.store.deliverablesDir(botId),
-        expects: this.expectationFor(manifest, job),
+        // A chat turn expects a reply, not a deliverable: with the 'work' contract the
+        // outcome gate would nudge it to "deliver something" and, producing nothing, it
+        // answers "Nothing to do" — the right behaviour for a task, the wrong one for a
+        // question.
+        expects: job.mode === 'chat' ? 'message' : this.expectationFor(manifest, job),
         recentRuns: this.recentRunsDigest(botId),
         stateNote: this.store.readState(botId),
         skillsPrompt,
@@ -1413,6 +1614,7 @@ export class BotManager {
         tools,
         userMemory,
         provider: resolveProvider(this.providers, manifest, this.config),
+        visionDeclared: (resolveProvider(this.providers, manifest, this.config) as { seesImages?: boolean }).seesImages,
         tokenBudget: this.tokenBudget,
         abortSignal: signal,
         // Pick up an interrupted run of this job where it stopped; checkpoint every step.
@@ -1713,6 +1915,90 @@ export class BotManager {
   }
 
   /**
+   * Attach a bot that already exists to a lead's fleet.
+   *
+   * `addCrew` only creates: a solo bot could not be put under a lead without editing its
+   * manifest by hand, which is exactly what a roster with a "add a member" sheet should spare
+   * you. Adoption is the same relationship as creation — the member's `parent` is the only
+   * state — so the store's `update` moves the profile into the lead's folder and validates the
+   * depth on the way.
+   */
+  adoptCrew(leadId: string, memberId: string): { ok: true; manifest: BotManifest } | { ok: false; error: string } {
+    const lead = this.store.get(leadId);
+    if (!lead) return { ok: false, error: `No bot "${leadId}"` };
+    if (lead.fleetRole !== 'lead') {
+      return { ok: false, error: `**${lead.name}** is not a fleet lead — promote it first` };
+    }
+    const member = this.store.get(memberId);
+    if (!member) return { ok: false, error: `No bot "${memberId}"` };
+    if (member.id === lead.id) return { ok: false, error: 'A bot cannot join its own fleet' };
+    if (member.parent === leadId) return { ok: true, manifest: member };
+    if (member.parent) {
+      return { ok: false, error: `**${member.name}** is already in **${member.parent}**'s fleet — remove it from there first` };
+    }
+    // A bot promoted to lead but leading nobody is still solo: adopting it demotes it, which
+    // is what the owner is asking for. Only a lead with actual members cannot join.
+    const ownCrew = this.store.crewOf(member.id);
+    if (ownCrew.length > 0) {
+      return { ok: false, error: `**${member.name}** leads ${ownCrew.length} équipier(s) — retire them first, or add them to this fleet instead` };
+    }
+    const crew = this.store.crewOf(leadId);
+    const cap = this.maxCrew();
+    if (crew.length >= cap) {
+      return { ok: false, error: `Fleet is at the crew cap (${crew.length}/${cap}) — retire a member first` };
+    }
+    // Depth: the member would take one level below this lead.
+    let ancestor: string | undefined = leadId;
+    let level = 1;
+    const seen = new Set<string>();
+    while (ancestor) {
+      if (seen.has(ancestor)) return { ok: false, error: 'Fleet cycle detected in parent chain' };
+      seen.add(ancestor);
+      if (level >= MAX_FLEET_DEPTH) return { ok: false, error: `Fleet nesting is capped at ${MAX_FLEET_DEPTH} levels` };
+      ancestor = this.store.get(ancestor)?.parent;
+      level += 1;
+    }
+    const canMessage = Array.from(new Set([...(member.comms?.canMessage ?? []), leadId]));
+    const manifest = this.store.update(member.id, (m) => {
+      m.fleetRole = 'crew';
+      m.parent = leadId;
+      m.comms = { ...(m.comms ?? {}), canMessage };
+    });
+    this.invalidateRuntime(leadId);
+    this.invalidateRuntime(member.id);
+    logger.info({ leadId, crewId: member.id }, 'Existing bot adopted into a fleet');
+    return { ok: true, manifest };
+  }
+
+  /**
+   * Take a bot out of a lead's fleet: it becomes solo again.
+   *
+   * The `parent` is the only state, so removing it is the whole operation — the store's
+   * `update` moves the profile back to the root and fires the relocation hook, exactly as
+   * adoption moved it in. The lead is dropped from `comms.canMessage` so the detached bot does
+   * not keep a channel it no longer has.
+   */
+  detachCrew(leadId: string, memberId: string): { ok: true; manifest: BotManifest } | { ok: false; error: string } {
+    const lead = this.store.get(leadId);
+    if (!lead) return { ok: false, error: `No bot "${leadId}"` };
+    const member = this.store.get(memberId);
+    if (!member) return { ok: false, error: `No bot "${memberId}"` };
+    if (member.parent !== leadId) {
+      return { ok: false, error: `**${member.name}** is not in **${lead.name}**'s fleet` };
+    }
+    const canMessage = (member.comms?.canMessage ?? []).filter((id) => id !== leadId);
+    const manifest = this.store.update(memberId, (m) => {
+      delete m.parent;
+      delete m.fleetRole;
+      m.comms = { ...(m.comms ?? {}), canMessage };
+    });
+    this.invalidateRuntime(leadId);
+    this.invalidateRuntime(memberId);
+    logger.info({ leadId, crewId: memberId }, 'Crew member detached from its fleet');
+    return { ok: true, manifest };
+  }
+
+  /**
    * Background persona refinement — bot_spawn used to await refinePersona
    * (up to two serial LLM calls) inside the lead's TOOL EXECUTION, stalling
    * the lead's turn once per spawned crew member. The member starts on the
@@ -1795,6 +2081,13 @@ export class BotManager {
     }
     this.queue.purgeBot(botId);
     this.tasks.purgeBot(botId);
+    // Mail to or from a deleted bot is unreadable by definition: leave it and the
+    // unread counter keeps ghosts nobody can open.
+    const mailPurged = this.inbox.purgeBot(botId);
+    if (mailPurged > 0) {
+      logger.info({ botId, entries: mailPurged }, 'Bot deleted: inbox entries purged');
+      this.announceRosterChange();
+    }
     this.store.delete(botId);
     this.registries.delete(botId);
     this.journals.delete(botId);
@@ -1805,6 +2098,7 @@ export class BotManager {
     this.activity.delete(botId);
     this.lastRun.delete(botId);
     this.needsYou.delete(botId);
+    this.announceRosterChange();
     this.pausedForBudget.delete(botId);
     if (this.held.delete(botId)) this.store.writeHeld(this.held);
     logger.info({ botId }, 'Bot deleted: queue/mail/DLQ purged, routines removed');
@@ -2118,6 +2412,7 @@ export class BotManager {
     const n = this.queue.clearDlq(botId);
     if (botId) { if (!this.getDlq(botId).length) this.needsYou.delete(botId); }
     else this.needsYou.clear();
+    this.announceRosterChange();
     return n;
   }
 
@@ -2201,7 +2496,13 @@ export class BotManager {
       source: entry.source,
       attempts: 0,
     });
-    if (result.accepted) this.queue.removeFromDlq(jobId);
+    if (!result.accepted) return result;
+    // The DLQ entry is gone, and so is the "needs you" it stood for. Without this the
+    // phone kept the card until the replayed run's own outcome arrived — a run that
+    // may sit behind a busy queue for a long while.
+    this.queue.removeFromDlq(jobId);
+    this.needsYou.delete(botId);
+    this.announceRosterChange();
     return result;
   }
 
@@ -2483,7 +2784,26 @@ function resolveProvider(providers: ProviderRegistry, manifest: BotManifest, con
   const requested = manifest.model?.provider;
   const getUsable = typeof providers.getUsable === 'function' ? providers.getUsable.bind(providers) : (name?: string) => (name ? providers.get(name) : undefined);
   const provider = getUsable(requested);
-  if (provider) return provider;
+  // A slug override rides on the chosen provider: `model.model` said one thing
+  // to the owner in the edit UI, and it must be what answers. Only providers
+  // that build their model lazily enough to honour it (the compat clients);
+  // the rest keep their configured model rather than lie about it.
+  const withSlug = (p: BaseProvider): BaseProvider => {
+    const slug = manifest.model?.model?.trim();
+    if (!slug || slug === p.getModel()) return p;
+    const cloner = (p as unknown as { withModel?: (slug: string) => BaseProvider }).withModel;
+    if (typeof cloner !== 'function') {
+      logger.warn({ botId: manifest.id, provider: p.name, slug }, 'Bot model slug ignored — this provider serves only its configured model');
+      return p;
+    }
+    try {
+      return cloner.call(p, slug);
+    } catch (err) {
+      logger.warn({ botId: manifest.id, provider: p.name, slug, err: (err as Error)?.message }, 'Bot model slug clone failed — keeping the configured model');
+      return p;
+    }
+  };
+  if (provider) return withSlug(provider);
   if (requested) {
     logger.warn({ botId: manifest.id, requested }, 'Bot provider not registered or not usable (no key / key rejected) — falling back to default');
   }
@@ -2491,7 +2811,7 @@ function resolveProvider(providers: ProviderRegistry, manifest: BotManifest, con
   // config names one and the crew bot has no choice of its own.
   const crewProvider = manifest.parent ? config?.bots?.fleets?.crewProvider : undefined;
   const crewLane = getUsable(crewProvider);
-  if (crewLane) return crewLane;
+  if (crewLane) return withSlug(crewLane);
   return providers.getDefault();
 }
 

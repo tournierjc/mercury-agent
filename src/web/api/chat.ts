@@ -16,6 +16,8 @@ import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, rmSync 
 import { join, extname, basename, relative, resolve } from 'node:path';
 import { getMercuryHome, loadConfig, getActiveProviders, type ProviderConfig } from '../../utils/config.js';
 import { basicAuthHeaders } from '../../providers/basic-auth.js';
+import { fetchProviderModelCatalog } from '../../utils/provider-models.js';
+import { logger } from '../../utils/logger.js';
 import type { SessionMessage, SessionRepository } from '../../sessions/index.js';
 import { SessionTitleError } from '../../sessions/repository.js';
 import { loadPermissionMode, savePermissionMode } from '../../capabilities/permission-mode-store.js';
@@ -625,11 +627,25 @@ async function listMercuryCloudModels(): Promise<string[]> {
 }
 
 /** Providers that serve many models list each one; others list their configured model. */
+/**
+ * The models a provider actually offers, not just the one it is configured with.
+ *
+ * This used to return `[]` for every OpenAI-compatible provider (deepseek, openaiCompat, litellm…), so
+ * the picker showed a single entry per provider and a model like deepseek-pro never appeared.
+ * `fetchProviderModelCatalog` is the same call the provider card's "test" uses, so the list is
+ * whatever `GET {baseUrl}/models` answers; a provider that refuses it keeps its configured model.
+ */
 async function listProviderModels(p: ProviderConfig): Promise<string[]> {
   if (p.name === 'ollamaLocal') return listOllamaModels(p);
   if (p.name === 'chatgptWeb') return [...(await listChatGPTModels())];
   if (p.name === 'mercuryCloud') return listMercuryCloudModels();
-  return [];
+  try {
+    const catalog = await fetchProviderModelCatalog(p.name as Parameters<typeof fetchProviderModelCatalog>[0], p);
+    return catalog.models;
+  } catch (err) {
+    logger.debug({ provider: p.name, err }, 'Model catalogue unavailable — configured model only');
+    return [];
+  }
 }
 
 /** What the picker needs to show a model in plain language. */

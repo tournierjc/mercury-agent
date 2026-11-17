@@ -11,6 +11,7 @@ import type { CapabilityRegistry } from '../capabilities/registry.js';
 import type { UserMemoryStore } from '../memory/user-memory.js';
 import type { TokenBudget } from '../utils/tokens.js';
 import type { BaseProvider } from '../providers/base.js';
+
 import { classifyStreamCompletion } from '../core/stream-completion.js';
 import { stepsExhaustedPrompt } from '../core/completion-verdict.js';
 import { isFailedToolResult } from '../core/execute-guard.js';
@@ -19,8 +20,28 @@ import { formatToolStep } from '../utils/tool-label.js';
 import { logger } from '../utils/logger.js';
 import { stripLoneSurrogates, truncateText } from '../utils/text-safe.js';
 import type { BotManifest, BotTrigger } from './types.js';
+import { BOT_SLASH_HINTS } from './bot-slash.js';
+import { getDefaultConfig } from '../utils/config.js';
+
 
 /** Mailbox messages injected mid-turn (bot-to-bot or queued user input). */
+/**
+ * One step's thinking, as the model emitted it.
+ *
+ * Reasoning used to be consumed and dropped: only a rolling tail of it reached the live feed, so a
+ * run explained after the fact showed what the bot did and never what it weighed. Kept per step and
+ * bounded (a run that thinks for twenty steps must not turn its transcript into a novel).
+ */
+export interface BotReasoningBlock {
+  step: number;
+  text: string;
+}
+
+/** Thinking kept per run, newest first when it does not fit. */
+const MAX_REASONING_CHARS = 24_000;
+/** Thinking kept for one step. */
+const MAX_REASONING_BLOCK_CHARS = 8_000;
+
 export interface BotTurnMail {
   from: string;
   content: string;
@@ -77,11 +98,18 @@ export type BotActivityEvent = {
   /** Filled by the manager for the live feed: when, which bot by name, what started the run. */
   at?: number;
   botName?: string;
-  trigger?: string;
+  /**
+   * What put this turn in the queue (`chat`, `cron`, `mailbox`…). Every event
+   * of the turn carries it, so a consumer can apply its notification policy
+   * without asking the manager what the job was. Empty from an older daemon.
+   */
+  trigger?: BotTrigger;
   /** turn-start / queued: the full request (≤ 600 chars). */
   prompt?: string;
   /** turn-start / queued: the bot that sent the work, for crew mail. */
   fromBot?: string;
+  /** `chat` answers the owner; `work` delivers (computed by the manager). */
+  mode?: 'work' | 'chat';
 };
 
 /**
@@ -140,6 +168,14 @@ export const DEFAULT_TURN_LIMITS: BotTurnLimits = {
 export interface BotTurnInput {
   manifest: BotManifest;
   trigger: BotTrigger;
+  /**
+   * 'work' (default): a delivery run, judged by what it changed — the rules below forbid
+   * narrating and tell the bot to answer "Nothing to do" when nothing needed doing.
+   * 'chat': the owner is talking to the bot in the app. The answer is the deliverable, so
+   * those rules would make it reply "Nothing to do" to a question — the one thing a
+   * conversation cannot do.
+   */
+  mode?: 'work' | 'chat';
   /** Durable job id — correlates activity events with the run. */
   jobId?: string;
   prompt: string;
@@ -160,7 +196,10 @@ export interface BotTurnInput {
    * a caption-less photo becomes `(Attached: names)` because a provider rejects an
    * empty text block, and a model without vision gets a note instead of pixels.
    */
+  /** Photos and PDFs handed to this turn; absent for every unattended wake. */
   attachments?: ChannelAttachment[];
+  /** The owner's declaration about this model's vision, when there is one. */
+  visionDeclared?: boolean;
   persona: string;
   /** Pending mailbox messages at turn start (attributed bot-to-bot handoffs). */
   mail: BotTurnMail[];
@@ -233,6 +272,16 @@ export interface BotTurnOutput {
   /** The no-outcome nudge was issued (once per turn). */
   outcomeNudged: boolean;
   trace: BotToolTraceEntry[];
+  /**
+   * The thinking the turn recorded, step by step.
+   *
+   * Filled from the provider stream's `reasoning-delta` parts — so an endpoint
+   * reached through a client that drops them records an empty list. `transport:
+   * compatible` is what makes them arrive for a compatible server.
+   */
+  reasoning: BotReasoningBlock[];
+  /** True when the oldest blocks were dropped to stay inside the transcript's cap. */
+  reasoningTruncated: boolean;
 }
 
 const MAX_STEPS_DEFAULT = 25;
@@ -346,7 +395,13 @@ async function runBotTurnInScope(input: BotTurnInput): Promise<BotTurnOutput> {
       timestamp: Date.now(),
       metadata: { attachments: files },
     } as never;
-    const withFiles = withAttachments(messages, turnMessage, provider.name, provider.getModel(), provider.seesImages);
+    // A REAL provider exposes `seesImages` from its own config; a port built by hand may not.
+    // Whoever is left without a declaration asks the config for this endpoint's, which is where the
+    // owner's `*_VISION` lands — otherwise a declared self-hosted vision model is told it cannot see.
+    const declaredVision = (provider as { seesImages?: boolean }).seesImages
+      ?? input.visionDeclared
+      ?? (getDefaultConfig().providers as unknown as Record<string, { vision?: boolean } | undefined>)[provider.name]?.vision;
+    const withFiles = withAttachments(messages, turnMessage, provider.name, provider.getModel(), declaredVision);
     messages.splice(0, messages.length, ...withFiles);
   }
 
@@ -376,6 +431,11 @@ async function runBotTurnInScope(input: BotTurnInput): Promise<BotTurnOutput> {
         status: ev.status,
         reasoningTail: ev.reasoningTail,
         textTail: ev.textTail,
+        // Every event carries where the turn came from: a phone applying its own
+        // notification policy ("cron rings, a fleet run rings through the lead
+        // only") must not have to ask the manager what the job was.
+        trigger: input.trigger,
+        mode: input.mode,
       });
     } catch { /* activity feedback must never break a turn */ }
   };
@@ -406,10 +466,32 @@ async function runBotTurnInScope(input: BotTurnInput): Promise<BotTurnOutput> {
     ...runReportTools((r) => { report = r; }),
   };
 
+  // Thinking, per step, bounded. Closing a block is the only place that trims, so the common case
+  // (a turn within budget) copies nothing.
+  const reasoning: BotReasoningBlock[] = [];
+  let reasoningTruncated = false;
+  let stepReasoning = '';
+  const closeReasoning = (): void => {
+    const text = stepReasoning.trim();
+    stepReasoning = '';
+    if (!text) return;
+    reasoning.push({
+      step: stepIndex,
+      text: text.length > MAX_REASONING_BLOCK_CHARS ? text.slice(0, MAX_REASONING_BLOCK_CHARS) : text,
+    });
+    let total = reasoning.reduce((sum, block) => sum + block.text.length, 0);
+    while (total > MAX_REASONING_CHARS && reasoning.length > 1) {
+      total -= reasoning[0].text.length;
+      reasoning.shift();
+      reasoningTruncated = true;
+    }
+  };
+
   const baseOutput = () => ({
     ...(taintOf() ? { taint: taintOf() } : {}),
     tokensIn, tokensOut, toolsUsed: [...toolsUsed], startedAt, steps: stepIndex, toolCalls: trace.length,
     peakInputTokens, deliverables: [...deliveries], outcomeNudged, trace: [...trace], ...(report ? { report } : {}),
+    reasoning: [...reasoning], reasoningTruncated,
   });
   const outcomeNow = (text: string): BotOutcome => computeOutcome({ trace, deliveries, expects, text, sandbox: input.sandbox, report });
 
@@ -495,12 +577,17 @@ async function runBotTurnInScope(input: BotTurnInput): Promise<BotTurnOutput> {
       };
       for await (const part of stream.fullStream) {
         if (part.type === 'reasoning-delta' && part.text) {
+          stepReasoning += part.text;
           reasoningTail = (reasoningTail + part.text).slice(-THINKING_TAIL_CHARS);
         } else if (part.type === 'text-delta' && part.text) {
           textTail = (textTail + part.text).slice(-THINKING_TAIL_CHARS);
-        } else if (part.type === 'start-step' && (reasoningTail || textTail)) {
-          reasoningTail += '\n\n';
-          textTail += '\n\n';
+        } else if (part.type === 'start-step') {
+          // A new step thinks anew; the previous step's thinking is closed and kept.
+          closeReasoning();
+          if (reasoningTail || textTail) {
+            reasoningTail += '\n\n';
+            textTail += '\n\n';
+          }
         } else if (part.type === 'error') {
           // The provider's real error. Without this, `stream.text` below
           // throws the generic "No output generated" and the journal never
@@ -510,6 +597,7 @@ async function runBotTurnInScope(input: BotTurnInput): Promise<BotTurnOutput> {
         if (Date.now() - lastEmit >= THINKING_EMIT_INTERVAL_MS) flushThinking();
       }
       flushThinking();
+      closeReasoning();
 
       let result: { text: string; finishReason: unknown };
       try {
@@ -638,6 +726,19 @@ async function runBotTurnInScope(input: BotTurnInput): Promise<BotTurnOutput> {
       return governedFailure(governorReason, lastResult?.text, limits, baseOutput(), input, trace, deliveries, expects, emit, stepIndex);
     }
     const message = err instanceof Error ? err.message : String(err);
+    // A provider that answers HTTP 200 with a body the SDK cannot parse says nothing about *why*:
+    // `Failed to process successful response` is all the owner sees, and the body that would explain
+    // it is dropped with the error. Keep it (redacted by the logger's serializers) for the post-mortem.
+    const providerError = err as { statusCode?: number; url?: string; responseBody?: string; cause?: unknown };
+    logger.error({
+      botId: input.manifest.id,
+      stepIndex,
+      statusCode: providerError?.statusCode,
+      url: providerError?.url,
+      errorMessage: message,
+      responseBody: typeof providerError?.responseBody === 'string' ? providerError.responseBody.slice(0, 8000) : undefined,
+      cause: providerError?.cause instanceof Error ? providerError.cause.message : undefined,
+    }, 'Bot turn failed');
     emit({ kind: 'turn-end', stepIndex, label: `failed: ${message.slice(0, 80)}`, status: 'error' });
     return {
       status: 'failed',
@@ -714,8 +815,7 @@ export function resolveTurnLimits(manifest: BotManifest, overrides?: Partial<Bot
 /**
  * The text a failure is classified on: the message, and what the error wraps.
  *
- * The AI SDK reports a cut stream as "Failed to process successful response" and keeps the real
- * reason in `cause` — an ECONNRESET, a body cut mid-read, a JSON parse error. Reading only the
+ * The AI SDK reports a cut stream as "Failed to process successful response" and keeps the real * reason in `cause` — an ECONNRESET, a body cut mid-read, a JSON parse error. Reading only the
  * message sent every one of those to unknown_error: no retry, DLQ, needs-you. A network blip then
  * looked like a permanent fault, and the owner was told a bot had failed when it had merely lost
  * its socket.
@@ -735,6 +835,53 @@ function failureText(err: unknown): string {
 }
 
 /** Map a provider/tool error to a typed reason code (retry vs permanent). */
+export /**
+ * No lone UTF-16 surrogate may reach the JSON body: `JSON.stringify` writes it as `\ud83c`, and
+ * DeepSeek then rejects the whole request — "400 Failed to parse the request body as JSON:
+ * messages[6].content: unexpected end of hex escape". An index-based cut through an emoji is enough
+ * to produce one, and it can come from anywhere (tool result, prompt, deliverable), so everything
+ * leaving for the model is cleaned, not just what this function truncates.
+ */
+function sanitizeString(value: string): string {
+  return /[\uD800-\uDFFF]/.test(value) ? stripLoneSurrogates(value) : value;
+}
+function sanitizeModelMessages(messages: ModelMessage[]): ModelMessage[] {
+  let changed = false;
+  const out = messages.map((m) => {
+    if (typeof m.content === 'string') {
+      const clean = sanitizeString(m.content);
+      if (clean === m.content) return m;
+      changed = true;
+      return { ...m, content: clean } as ModelMessage;
+    }
+    if (!Array.isArray(m.content)) return m;
+    let partChanged = false;
+    type OutgoingPart = { type?: string; text?: unknown; output?: { type?: string; value?: unknown } };
+    const parts = (m.content as unknown as OutgoingPart[]).map((p) => {
+      if (p?.type === 'text' && typeof p.text === 'string') {
+        const clean = sanitizeString(p.text);
+        if (clean !== p.text) {
+          partChanged = true;
+          return { ...p, text: clean };
+        }
+        return p;
+      }
+      if (p?.type === 'tool-result' && typeof p.output?.value === 'string') {
+        const clean = sanitizeString(p.output.value);
+        if (clean !== p.output.value) {
+          partChanged = true;
+          return { ...p, output: { ...p.output, value: clean } };
+        }
+      }
+      return p;
+    });
+    if (!partChanged) return m;
+    changed = true;
+    return { ...m, content: parts } as unknown as ModelMessage;
+  });
+  return changed ? out : messages;
+}
+
 export function classifyFailure(err: unknown): string {
   let msg = failureText(err);
   // Retry wrappers ("Failed after 3 attempts. Last error: …") carry the
@@ -878,49 +1025,8 @@ type ToolResultPart = { type: 'tool-result'; toolName?: string; output?: ToolOut
  * DeepSeek then rejects the whole request — "400 Failed to parse the request body as JSON:
  * messages[6].content: unexpected end of hex escape". An index-based cut through an emoji is enough
  * to produce one, and it can come from anywhere (tool result, prompt, deliverable), so everything
- * leaving for the model is cleaned, not just what this function truncates.
+ * that becomes a message body goes through the same sanitizer.
  */
-function sanitizeString(value: string): string {
-  return /[\uD800-\uDFFF]/.test(value) ? stripLoneSurrogates(value) : value;
-}
-
-function sanitizeModelMessages(messages: ModelMessage[]): ModelMessage[] {
-  let changed = false;
-  const out = messages.map((m) => {
-    if (typeof m.content === 'string') {
-      const clean = sanitizeString(m.content);
-      if (clean === m.content) return m;
-      changed = true;
-      return { ...m, content: clean } as ModelMessage;
-    }
-    if (!Array.isArray(m.content)) return m;
-    let partChanged = false;
-    type OutgoingPart = { type?: string; text?: unknown; output?: { type?: string; value?: unknown } };
-    const parts = (m.content as unknown as OutgoingPart[]).map((p) => {
-      if (p?.type === 'text' && typeof p.text === 'string') {
-        const clean = sanitizeString(p.text);
-        if (clean !== p.text) {
-          partChanged = true;
-          return { ...p, text: clean };
-        }
-        return p;
-      }
-      if (p?.type === 'tool-result' && typeof p.output?.value === 'string') {
-        const clean = sanitizeString(p.output.value);
-        if (clean !== p.output.value) {
-          partChanged = true;
-          return { ...p, output: { ...p.output, value: clean } };
-        }
-      }
-      return p;
-    });
-    if (!partChanged) return m;
-    changed = true;
-    return { ...m, content: parts } as unknown as ModelMessage;
-  });
-  return changed ? out : messages;
-}
-
 export function compactMessages(messages: ModelMessage[], limits: Pick<BotTurnLimits, 'keepRecentToolResults' | 'maxToolResultChars'>): ModelMessage[] {
   const resultRefs: Array<{ mi: number; pi: number }> = [];
   messages.forEach((m, mi) => {
@@ -1079,12 +1185,32 @@ export function buildBotSystemPrompt(input: BotTurnInput): { stable: string; vol
   prompt += '\n';
   prompt += input.persona;
 
-  prompt += `\n\nOperating rules:
+  if (input.mode === 'chat') {
+    // The owner is talking to this bot in the app. Answer like a person, not like a worker
+    // filing a report: the text IS the reply, and a question has an answer even when no
+    // tool is needed. The chat branch deliberately drops the report-tool instruction —
+    // it is what produced "Nothing to do: the request needed no tool" in a conversation.
+    prompt += `\n\nConversation rules:
+- You are talking with your owner, in the Mercury app, in a conversation they read. Your final text IS your reply: write it to be read, and stop.
+- Answer what was asked. Never reply "Nothing to do" and never write a report about the run — no "the user asked X, so I did Y", just the answer.
+- Use your tools when they help (a file to write, a command to check), but a question that needs no tool still deserves a real answer.
+- Be concise and concrete; say plainly when something is outside your specialty.
+- A line starting with "/" is a slash command: the daemon answers a few of them
+  directly, before your turn even runs — ${BOT_SLASH_HINTS.map(([cmd]) => `\`${cmd}\``).join(', ')}.
+  Never answer one from imagination ("I have no compaction tool" is wrong — the
+  gauge is the daemon's, not yours); if a slash reaches you as a real task, say
+  what it would do rather than pretending to have run it.
+- Answer in the conversation. Do not deliver a file unless the owner explicitly asks for one: a
+  table, a chart or a rendering belongs in your reply (an \`\`\`openui block, when the OpenUI
+  contract is available), not in the deliverables folder.`;
+  } else {
+    prompt += `\n\nOperating rules:
 - You run unattended: NEVER ask the user questions or wait for confirmation. If a required input is missing, state the assumption you are proceeding with.
 - Actions you lack permission for are denied automatically (fail-closed). Do not attempt workarounds; report what you could not do.
 - Stay in your specialty; say so plainly when a request falls outside it.
-- Work, don't narrate: a run is judged by what it delivered or changed, not by what it wrote about itself. Do not write records, receipts, logs or status files about your own runs — Mercury keeps the journal.
+- Work, don't narrate: a run is judged by what it delivered or changed, not by what it wrote about itself. Do not write records, receipts, logs or status files about your own runs — Mercury keeps the journal. If there is nothing to do, say "Nothing to do:" and the reason, and stop.
 - END EVERY RUN WITH EXACTLY ONE of: bot_report (a result or finding for the owner; deliver files first), bot_no_update (nothing new — recorded quietly, nobody is notified), bot_report_failure (you couldn't do it, and why). Then stop.`;
+  }
 
   // Sandbox: the bot's always-granted work areas (rw+x, no permission ask).
   prompt += `\n\nSandbox (always granted — read, write, execute; no permission needed):
