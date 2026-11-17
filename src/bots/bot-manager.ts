@@ -371,6 +371,27 @@ export class BotManager {
     this.activityListeners.add(listener);
     return () => this.activityListeners.delete(listener);
   }
+
+  /** Roster-change listeners: a client stream re-sends the snapshot when a bot's state moves. */
+  private rosterListeners = new Set<() => void>();
+  onRosterChange(listener: () => void): () => void {
+    this.rosterListeners.add(listener);
+    return () => this.rosterListeners.delete(listener);
+  }
+
+  /**
+   * Announces that the roster moved, so every feed re-sends a fresh snapshot.
+   *
+   * A `needsYou` that flips off used to be silence: the manager set the flag, the journal
+   * recorded it, and no `bot_roster` frame ever followed — the phone kept the card ("needs
+   * you") raised until its process died, because the diff it reads needs a push to see the
+   * change. Every state transition that a client's badge reads goes through here.
+   */
+  private announceRosterChange(): void {
+    for (const listener of this.rosterListeners) {
+      try { listener(); } catch { /* a dead client must not break the others */ }
+    }
+  }
   private emitBotActivity(ev: BotActivityEvent): void {
     // Live roster label: keep the static job description until the first
     // step arrives, then follow the actual work. 'thinking' events are a
@@ -1162,6 +1183,7 @@ export class BotManager {
       });
       this.lastRun.set(botId, { at: Date.now(), state: record.state });
       this.needsYou.delete(botId);
+      this.announceRosterChange();
       this.recordBotTokens(botId, manifest, output.tokensIn + output.tokensOut);
       // Did this run fail for good (not a retry, not a policy cut-off)? Either the
       // turn died, or the bot itself reported that it couldn't do the job.
@@ -1269,6 +1291,7 @@ export class BotManager {
         this.store.clearCheckpoint(botId, job.id);
         this.jobDepth.delete(job.id);
         this.needsYou.add(botId);
+        this.announceRosterChange();
         logger.warn({ botId, jobId: job.id, reasonCode: output.reasonCode }, 'Bot turn failed permanently — moved to DLQ (replayable via /bots dlq)');
         // A routine failing again and again tells the owner once, on the first
         // failure; the streak switches it off after ROUTINE_FAIL_OFF_AFTER.
@@ -1425,6 +1448,7 @@ export class BotManager {
         needsYou: true,
       });
       this.needsYou.add(botId);
+      this.announceRosterChange();
     } finally {
       if (heartbeat) clearInterval(heartbeat);
       running.delete(job.id);
@@ -1974,6 +1998,7 @@ export class BotManager {
     this.activity.delete(botId);
     this.lastRun.delete(botId);
     this.needsYou.delete(botId);
+    this.announceRosterChange();
     this.pausedForBudget.delete(botId);
     if (this.held.delete(botId)) this.store.writeHeld(this.held);
     logger.info({ botId }, 'Bot deleted: queue/mail/DLQ purged, routines removed');
@@ -2287,6 +2312,7 @@ export class BotManager {
     const n = this.queue.clearDlq(botId);
     if (botId) { if (!this.getDlq(botId).length) this.needsYou.delete(botId); }
     else this.needsYou.clear();
+    this.announceRosterChange();
     return n;
   }
 
@@ -2359,6 +2385,11 @@ export class BotManager {
     const entry = this.queue.peekDlq(jobId);
     if (!entry || entry.botId !== botId) return { accepted: false, reasonCode: 'not_found' };
     this.queue.removeFromDlq(jobId);
+    // The DLQ entry is gone: the "needs you" it stood for is over. Without this the
+    // phone kept the card until the replayed run's own outcome arrived — a run that
+    // may sit behind a busy queue for a long while.
+    this.needsYou.delete(botId);
+    this.announceRosterChange();
     return this.enqueue(botId, {
       trigger: entry.trigger,
       prompt: entry.prompt,

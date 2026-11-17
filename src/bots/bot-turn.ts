@@ -63,6 +63,14 @@ export type BotActivityEvent = {
    *  every consumer to reassemble state — tails render stateless instead). */
   reasoningTail?: string;
   textTail?: string;
+  /**
+   * What put this turn in the queue (`chat`, `cron`, `mailbox`…). Every event
+   * of the turn carries it, so a consumer can apply its notification policy
+   * without asking the manager what the job was. Empty from an older daemon.
+   */
+  trigger?: BotTrigger;
+  /** `chat` answers the owner; `work` delivers (computed by the manager). */
+  mode?: 'work' | 'chat';
 };
 
 /**
@@ -365,6 +373,11 @@ export async function runBotTurn(input: BotTurnInput): Promise<BotTurnOutput> {
         status: ev.status,
         reasoningTail: ev.reasoningTail,
         textTail: ev.textTail,
+        // Every event carries where the turn came from: a phone applying its own
+        // notification policy ("cron rings, a fleet run rings through the lead
+        // only") must not have to ask the manager what the job was.
+        trigger: input.trigger,
+        mode: input.mode,
       });
     } catch { /* activity feedback must never break a turn */ }
   };

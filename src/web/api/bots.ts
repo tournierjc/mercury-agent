@@ -89,6 +89,9 @@ app.post('/api/bots/inbox/read', async (c: Context) => {
   const body = (await c.req.json().catch(() => ({}))) as { ids?: unknown };
   const ids = Array.isArray(body.ids) ? body.ids.filter((x): x is string => typeof x === 'string').slice(0, 1000) : undefined;
   botManager.inbox.markRead(ids);
+  // The unread counts changed: every roster feed (phone, dashboards) must re-send
+  // the snapshot, or a client's badge keeps its stale number forever.
+  broadcastRoster();
   return c.json({ ok: true, unread: botManager.inbox.unread() });
 });
 

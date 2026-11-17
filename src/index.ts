@@ -2827,6 +2827,10 @@ async function runAgent(isDaemon: boolean = false): Promise<void> {
       if (botCliChannel instanceof CLIChannel) botCliChannel.setBotLiveActivity(ev.botId, ev);
       webChannel.broadcastBotActivity(ev);
     });
+    // A roster change a client's badge reads must be pushed, not polled: needsYou
+    // flipping off, mail being marked read, a bot deleted. Without this the phone
+    // kept its notification cards until the process died — nothing ever told it.
+    bot.onRosterChange(() => webChannel.broadcastBotRoster(bot));
     if (config.bots?.webhookSecret) {
       setBotsWebhookSecret(config.bots.webhookSecret);
     }
