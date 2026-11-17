@@ -1988,6 +1988,13 @@ export class BotManager {
     }
     this.queue.purgeBot(botId);
     this.tasks.purgeBot(botId);
+    // Mail to or from a deleted bot is unreadable by definition: leave it and the
+    // unread counter keeps ghosts nobody can open.
+    const mailPurged = this.inbox.purgeBot(botId);
+    if (mailPurged > 0) {
+      logger.info({ botId, entries: mailPurged }, 'Bot deleted: inbox entries purged');
+      this.announceRosterChange();
+    }
     this.store.delete(botId);
     this.registries.delete(botId);
     this.journals.delete(botId);

@@ -154,4 +154,26 @@ export class BotInbox {
       renameSync(tmp, this.path);
     } catch { /* rotation is housekeeping */ }
   }
+
+  /**
+   * A bot was deleted: its mail must not outlive it. Every fleet-inbox view filters
+   * per bot, so a dead bot's entries were invisible-but-counted — nothing ever read
+   * them, nothing ever dropped them, and the unread total carried ghosts forever.
+   */
+  purgeBot(botId: string): number {
+    let out = this.all();
+    const n = out.filter((e) => e.botId === botId).length;
+    out = out.filter((e) => e.botId !== botId);
+    // Drop the read marks too: ids of purged entries are harmless, but `all` is a
+    // timestamp and stays as is. Rewrite compacted, keeping the read marks file.
+    try {
+      const tmp = `${this.path}.tmp`;
+      atomicWrite(tmp, out.map((e) => JSON.stringify(e)).join('\n') + '\n');
+      renameSync(tmp, this.path);
+    } catch (err) {
+      logger.warn({ err: (err as Error)?.message, botId }, 'Could not purge bot inbox');
+    }
+    if (n > 0) this.markRead();
+    return n;
+  }
 }
