@@ -964,7 +964,12 @@ export function compactMessages(messages: ModelMessage[], limits: Pick<BotTurnLi
     });
   });
   if (resultRefs.length === 0) return sanitizeModelMessages(messages);
-  const stubBefore = Math.max(0, resultRefs.length - limits.keepRecentToolResults);
+  // Stub in batches of keepRecentToolResults: moving the boundary every step rewrote an early tool
+  // result on every request, so the server's prompt cache (hybrid models resume only at a saved
+  // state) missed from that point on each step. Now the prefix changes once every K results and
+  // between K and 2K-1 results stay verbatim.
+  const k = Math.max(1, limits.keepRecentToolResults);
+  const stubBefore = Math.max(0, Math.floor((resultRefs.length - limits.keepRecentToolResults) / k) * k);
   const out = messages.slice();
   resultRefs.forEach(({ mi, pi }, idx) => {
     const content = out[mi].content as unknown as ToolResultPart[];

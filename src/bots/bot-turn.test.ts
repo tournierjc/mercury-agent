@@ -382,6 +382,7 @@ describe('compactMessages', () => {
     const msgs = [
       { role: 'user', content: 'go' },
       toolMsg('a', 'old '.repeat(300)),
+      toolMsg('a2', 'older '.repeat(300)),
       toolMsg('b', big),
       toolMsg('c', 'recent'),
     ];
@@ -389,11 +390,34 @@ describe('compactMessages', () => {
     expect(out[0]).toBe(msgs[0]);
     expect(out[1].content[0].output.value).toContain('more chars trimmed from an earlier step');
     expect(out[1].content[0].output.value.length).toBeLessThan(600);
-    expect(out[2].content[0].output.value).toContain('[…truncated');
-    expect(out[2].content[0].output.value.length).toBeLessThan(1100);
-    expect(out[3].content[0].output.value).toBe('recent');
+    expect(out[2].content[0].output.value).toContain('more chars trimmed from an earlier step');
+    expect(out[3].content[0].output.value).toContain('[…truncated');
+    expect(out[3].content[0].output.value.length).toBeLessThan(1100);
+    expect(out[4].content[0].output.value).toBe('recent');
     // Never mutates the originals.
-    expect((msgs[2] as { content: Array<{ output: { value: string } }> }).content[0].output.value).toBe(big);
+    expect((msgs[3] as { content: Array<{ output: { value: string } }> }).content[0].output.value).toBe(big);
+  });
+
+  // A server prompt cache reuses the longest unchanged prefix; hybrid models (GLM 5.3) can only resume
+  // at a saved state. Moving the stub boundary by one result every step rewrote an early tool result
+  // on every request, so the cache missed from there each step. The boundary now moves in batches.
+  it('moves the stub boundary only every keepRecentToolResults results', () => {
+    const keep = 8;
+    const stubbed = (n: number): number => {
+      const msgs = Array.from({ length: n }, (_, i) => toolMsg(`t${i}`, `r${i} `.repeat(200)));
+      const out = compactMessages(msgs as never, { keepRecentToolResults: keep, maxToolResultChars: 100_000 }) as unknown as Array<{ content: Array<{ output: { value: string } }> }>;
+      return out.filter((m) => m.content[0].output.value.includes('more chars trimmed from an earlier step')).length;
+    };
+    for (let n = 1; n <= 40; n++) {
+      const s = stubbed(n);
+      expect(s % keep).toBe(0);
+      expect(s).toBe(n < keep ? 0 : Math.floor((n - keep) / keep) * keep);
+      // The newest keep..2*keep-1 results stay verbatim.
+      expect(n - s).toBeGreaterThanOrEqual(Math.min(n, keep));
+      expect(n - s).toBeLessThan(2 * keep);
+    }
+    // Between boundaries, a new step leaves every earlier message unchanged (a stable prefix).
+    for (let n = keep + 1; n < 2 * keep; n++) expect(stubbed(n)).toBe(stubbed(n - 1));
   });
   it('is a no-op without tool results', () => {
     const msgs = [{ role: 'user', content: 'hi' }];
