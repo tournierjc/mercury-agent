@@ -134,8 +134,22 @@ function crossSite(c: Context): boolean {
   // No Origin/Referer at all = not a browser (native clients, curl): nothing
   // to compare, and a real cross-site browser request always carries Origin.
   if (!c.req.header('origin') && !c.req.header('referer')) return false;
+  // Hardened browsers (privacy-hardened Firefox / LibreWolf) send `Origin: null`
+  // with no Referer on ordinary same-origin form posts. An opaque origin gives
+  // us nothing to compare — treat it exactly like an absent one: the Referer,
+  // when present, still decides; without either, it is not a forgeable browser request.
+  if (c.req.header('origin') === 'null') {
+    const referer = c.req.header('referer');
+    if (!referer) return false;
+    try {
+      const host = c.req.header('x-forwarded-host') || c.req.header('host') || '';
+      return new URL(referer).host.toLowerCase() !== host.toLowerCase();
+    } catch {
+      return true;
+    }
+  }
   const origin = c.req.header('origin') ?? (() => { try { return new URL(c.req.header('referer') ?? '').origin; } catch { return ''; } })();
-  if (!origin || origin === 'null') return true;
+  if (!origin) return true;
   try {
     const host = c.req.header('x-forwarded-host') || c.req.header('host') || '';
     return new URL(origin).host.toLowerCase() !== host.toLowerCase();

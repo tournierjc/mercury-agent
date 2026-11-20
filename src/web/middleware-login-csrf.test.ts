@@ -39,4 +39,36 @@ describe('authGuard cross-site login check', () => {
     });
     expect(res.status).toBe(200);
   });
+
+  it('accepts a hardened browser sending Origin: null with no Referer', async () => {
+    const res = await app().request('/api/auth/login', {
+      method: 'POST',
+      headers: { host: 'spark-a286.tail128204.ts.net:6182', origin: 'null' },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('accepts Origin: null when the Referer matches the Host', async () => {
+    const res = await app().request('/api/auth/login', {
+      method: 'POST',
+      headers: {
+        host: 'spark-a286.tail128204.ts.net:6182',
+        origin: 'null',
+        referer: 'http://spark-a286.tail128204.ts.net:6182/login',
+      },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects Origin: null when the Referer points elsewhere', async () => {
+    const res = await app().request('/api/auth/login', {
+      method: 'POST',
+      headers: {
+        host: 'spark-a286.tail128204.ts.net:6182',
+        origin: 'null',
+        referer: 'http://evil.example.com/page',
+      },
+    });
+    expect(res.status).toBe(403);
+  });
 });
